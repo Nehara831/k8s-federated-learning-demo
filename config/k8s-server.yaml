@@ -1,0 +1,23 @@
+dataset:
+  type: "5gnidd"
+  test_size: 0.2
+  seed: 42
+  data_dir: "./data"
+
+num_rounds: 5
+num_clients: 3  # Changed from 1
+batch_size: 256
+num_classes: 9  # Changed from 10 (5G-NIDD has 9 attack types)
+
+server:
+  port: 8080
+  fraction_fit: 1.0
+  fraction_evaluate: 1.0
+  min_fit_clients: 3        # Changed from 1
+  min_evaluate_clients: 3   # Changed from 1
+  min_available_clients: 3  # Changed from 1
+
+config_fit:
+  lr: 0.01
+  momentum: 0.9
+  local_epochs: 1

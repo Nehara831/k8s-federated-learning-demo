@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fl-server
+  namespace: federated-learning
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fl-server
+  template:
+    metadata:
+      labels:
+        app: fl-server
+    spec:
+      containers:
+      - name: fl-server
+        image: fl-server:v10  # Changed from v4
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8080
+        env:
+        - name: CONFIG_PATH
+          value: "/app/config/k8s-server.yaml"
+        volumeMounts:
+        - name: server-config
+          mountPath: /app/config
+        - name: shared-storage
+          mountPath: /app/outputs
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "3Gi"
+            cpu: "2000m"
+      volumes:
+      - name: server-config
+        configMap:
+          name: fl-server-config
+      - name: shared-storage
+        persistentVolumeClaim:
+          claimName: fl-shared-pvc

@@ -1,0 +1,23 @@
+# Make scripts executable
+chmod +x scripts/*.sh
+
+# Build and deploy
+./scripts/build-images.sh
+./scripts/deploy.sh
+
+# Monitor the deployment
+kubectl get pods -n federated-learning -w
+
+# Check logs
+kubectl logs -f deployment/fl-server -n federated-learning
+kubectl logs -f deployment/fl-clients -n federated-learning
+
+# Scale clients
+./scripts/scale-clients.sh 15
+
+# Cleanup
+./scripts/cleanup.sh
+
+
+
+
