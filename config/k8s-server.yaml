@@ -5,19 +5,26 @@ dataset:
   data_dir: "./data"
 
 num_rounds: 5
-num_clients: 3  # Changed from 1
+num_clients: 3
 batch_size: 256
-num_classes: 9  # Changed from 10 (5G-NIDD has 9 attack types)
+num_classes: 9
 
 server:
   port: 8080
   fraction_fit: 1.0
   fraction_evaluate: 1.0
-  min_fit_clients: 3        # Changed from 1
-  min_evaluate_clients: 3   # Changed from 1
-  min_available_clients: 3  # Changed from 1
+  min_fit_clients: 3
+  min_evaluate_clients: 3
+  min_available_clients: 3
 
 config_fit:
   lr: 0.01
   momentum: 0.9
   local_epochs: 1
+
+# Malicious client detection configuration
+detector:
+  enabled: true  # Set to false to disable detection
+  save_dir: "./outputs/detector"
+  model:
+    model_path: "/app/detector_model/finetuned_model_5gnidd_gausian_noise"  # Path to your LoRA model in container

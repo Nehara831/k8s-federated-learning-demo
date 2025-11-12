@@ -9,3 +9,5 @@ pandas==2.0.3
 transformers==4.30.0
 datasets==2.12.0
 kagglehub
+peft==0.4.0
+joblib==1.3.0

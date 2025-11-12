@@ -10,3 +10,4 @@ matplotlib==3.7.2
 transformers==4.30.0
 datasets==2.12.0
 kagglehub
+peft==0.4.0

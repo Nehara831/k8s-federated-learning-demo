@@ -13,9 +13,10 @@ spec:
       labels:
         app: fl-server
     spec:
+      restartPolicy: Always  # <-- Must be Always for Deployment!
       containers:
       - name: fl-server
-        image: fl-server:v10  # Changed from v4
+        image: fl-server:v11  # Changed from v4
         imagePullPolicy: Never
         ports:
         - containerPort: 8080

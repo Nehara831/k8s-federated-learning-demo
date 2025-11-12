@@ -8,12 +8,17 @@ dataset:
   seed: 42
   data_dir: "/app/data"
 
-num_clients: 3  # Changed from 1
-num_classes: 9  # 5G-NIDD has 9 attack types
+num_clients: 3
+num_classes: 9
 batch_size: 256
 
 attack:
-  enabled: false
+  enabled: true
+  attack_type: "gaussian_noise"  
+  malicious_ratio: 0.33  # 1 out of 3 clients is malicious
+  attack_params:
+    noise_multiplier: 10.0
+    flip_probability: 0.5
 
 config_fit:
   lr: 0.01
