@@ -25,6 +25,7 @@ class K8sFederatedStrategy(FedAvg):
         """Configure the next round of training"""
         config = {
             "server_round": server_round,
+            "round_num": server_round,  # Add round_num for client compatibility
             "local_epochs": self.config.config_fit.local_epochs,
             "lr": self.config.config_fit.lr,
             "momentum": self.config.config_fit.momentum,
@@ -69,6 +70,15 @@ class K8sFederatedStrategy(FedAvg):
         
         return [(client, evaluate_ins) for client in clients]
 
+    def _get_client_numeric_id(self, cid: str) -> int:
+        """Extract numeric ID from client ID string (e.g., 'ipv4:10.244.0.8:37600' -> hash)"""
+        try:
+            # Try direct conversion for simple numeric IDs
+            return int(cid)
+        except ValueError:
+            # For network addresses, use hash to get consistent numeric ID
+            return abs(hash(cid)) % (10 ** 8)
+    
     def aggregate_fit(
         self,
         server_round: int,
@@ -80,25 +90,38 @@ class K8sFederatedStrategy(FedAvg):
         total_responses = len(results)
         logger.info(f"Round {server_round}: Received {total_responses} client responses")
         
-        # Start new round in detector
-        if self.malicious_detector and server_round > 0:
-            self.malicious_detector.start_new_round(server_round)
-        
-        # Detect malicious clients
+        # Separate participating and non-participating clients
         participating_results = []
         malicious_ground_truth = []
+        all_client_ids = []
         
         for client_proxy, fit_res in results:
-            client_id = int(client_proxy.cid)
+            client_id_str = str(client_proxy.cid)
+            all_client_ids.append(client_id_str)
             
-            # Track ground truth malicious clients
-            attack_type = fit_res.metrics.get("attack_type", "none")
-            if attack_type != "none":
-                malicious_ground_truth.append(str(client_id))
-                logger.info(f"Client {client_id} performed {attack_type} attack")
+            is_non_participating = fit_res.metrics.get("non_participating", False)
+            logger.info(f"Metrics: {fit_res.metrics} Client {client_proxy.cid}")
             
-            # Run malicious detection (only after round 1)
-            if self.malicious_detector and server_round > 1:
+            if not is_non_participating:
+                participating_results.append((client_proxy, fit_res))
+                logger.info(f"Round {server_round}: Client {client_proxy.cid} - PARTICIPATING ({fit_res.metrics.get('attack_type', 'unknown')} attack)")
+            
+            # Count all malicious clients, even if non-participating
+            if fit_res.metrics.get("attack_type", "unknown") != "unknown":
+                malicious_ground_truth.append(client_id_str)
+        
+        logger.info(f"Total clients participated: {len(participating_results)}")
+        total_client_count = len(all_client_ids)  # Use all clients, not just participating
+        
+        # Start new round in detector
+        if self.malicious_detector and server_round > 1:
+            self.malicious_detector.start_new_round(server_round)
+            
+            # Update detector with client behaviors for ALL clients
+            for client_proxy, fit_res in results:
+                client_id = self._get_client_numeric_id(client_proxy.cid)
+                client_id_str = str(client_proxy.cid)
+                
                 current_round_params = parameters_to_ndarrays(fit_res.parameters)
                 prev_round_model = self.get_previous_round_model(server_round)
                 
@@ -106,52 +129,57 @@ class K8sFederatedStrategy(FedAvg):
                     prev_round_params = parameters_to_ndarrays(prev_round_model)
                     
                     # Update detector and get prediction
-                    prediction = self.malicious_detector.update_client_behavior(
+                    result = self.malicious_detector.update_client_behavior(
                         client_id, 
                         server_round, 
                         current_round_params, 
                         prev_round_params
                     )
                     
-                    is_actually_malicious = str(client_id) in malicious_ground_truth
-                    logger.info(f"Client {client_id}: Predicted={prediction}, Actual Malicious={is_actually_malicious}")
+                    is_actually_malicious = client_id_str in malicious_ground_truth
+                    logger.info(f"Result is {result} is actually malicious {is_actually_malicious}")
+                    
+                    if not(is_actually_malicious) and (result == 1):
+                        logger.info(f"[+] DEBUG LINE: {client_id} round no: {server_round} is misclassified as malicious")
         
-        # Filter out detected malicious clients
-        if self.malicious_detector and self.malicious_detector.is_trained and server_round > 1:
-            suspicious_clients = self.malicious_detector.get_suspicious_clients()
-            
-            if suspicious_clients:
-                filtered_results = []
-                malicious_count = 0
+            # Filter out detected malicious clients
+            if self.malicious_detector.is_trained:
+                suspicious_clients = self.malicious_detector.get_suspicious_clients()
+                logger.info("[+] inside self.malicious_detector.is_trained")
+                logger.info(f"[+] inside {suspicious_clients}")
                 
-                for client_proxy, fit_res in results:
-                    client_id = int(client_proxy.cid)
-                    if client_id not in suspicious_clients:
-                        filtered_results.append((client_proxy, fit_res))
-                    else:
-                        malicious_count += 1
-                        logger.warning(f"🚫 Client {client_id} EXCLUDED (detected as malicious)")
+                if suspicious_clients:
+                    # Filter out detected malicious clients
+                    filtered_results = []
+                    malicious_count = 0
+                    
+                    for client_proxy, fit_res in participating_results:
+                        client_id = self._get_client_numeric_id(client_proxy.cid)
+                        if client_id not in suspicious_clients:
+                            filtered_results.append((client_proxy, fit_res))
+                        else:
+                            malicious_count += 1
+                            logger.warning(f"🚫 Client {client_id} EXCLUDED (detected as malicious)")
+                    
+                    participating_results = filtered_results
+                    logger.info(f"Filtered out {malicious_count} detected malicious clients")
                 
-                participating_results = filtered_results
-                logger.info(f"Filtered out {malicious_count} detected malicious clients")
-            else:
-                participating_results = results
-            
-            # Calculate and save detection metrics
-            perf_results = self.calculate_metrics(
-                suspicious_clients, 
-                malicious_ground_truth, 
-                total_responses
-            )
-            
-            if "error" not in perf_results:
-                self.malicious_detector.save_performance_metrics(perf_results, server_round)
-        else:
-            participating_results = results
+                # Use total_client_count and full malicious_ground_truth for metrics
+                perf_results = self.calculate_metrics(
+                    suspicious_clients, 
+                    malicious_ground_truth, 
+                    total_client_count
+                )
+                
+                # Only save metrics if calculation was successful (no error)
+                if "error" not in perf_results:
+                    self.malicious_detector.save_performance_metrics(perf_results, server_round)
+                else:
+                    logger.warning(f"Round {server_round}: Cannot calculate performance metrics - {perf_results['error']}")
         
         logger.info(f"Aggregating {len(participating_results)} participating clients")
         
-        # Call parent's aggregate_fit
+        # Call parent's aggregate_fit with participating results only
         aggregated_params, metrics = super().aggregate_fit(
             server_round, participating_results, failures
         )
@@ -180,10 +208,14 @@ class K8sFederatedStrategy(FedAvg):
     
     def get_model_from_round(self, round_num):
         """Get model parameters from a specific round"""
+        logger.info(f"[DEBUG] get_model_from_round called with round_num={round_num}")
+        
         if round_num == 0:
+            # Round 0 uses saved initial parameters
+            logger.info(f"[DEBUG] Round 0 requested, _saved_initial_parameters exists: {self._saved_initial_parameters is not None}")
             if self._saved_initial_parameters is not None:
                 logger.info("Returning initial parameters for round 0")
-                return self._saved_initial_parameters
+                return self._saved_initial_parameters  # Return the actual initial parameters
             else:
                 logger.error("No initial parameters available!")
                 return None
@@ -199,38 +231,76 @@ class K8sFederatedStrategy(FedAvg):
     def get_previous_round_model(self, current_round):
         """Get the model from the previous round"""
         if current_round <= 0:
+            logger.warning("No previous round available for round 0")
             return None
         
         previous_round = current_round - 1
         return self.get_model_from_round(previous_round)
     
     def calculate_metrics(self, suspicious_clients, ground_truth, total_clients):
-        """Calculate detection performance metrics"""
+        """Calculate comprehensive metrics for the malicious detector"""
+        
+        # Convert to consistent format (strings) and log inputs
         suspicious_clients = [str(client_id) for client_id in suspicious_clients]
         ground_truth = [str(client_id) for client_id in ground_truth]
         
+        logger.info(f"=== METRICS CALCULATION DEBUG ===")
+        logger.info(f"Total clients: {total_clients}")
+        logger.info(f"Suspicious clients: {suspicious_clients}")
+        logger.info(f"Ground truth malicious: {ground_truth}")
+        
+        # Convert to sets for easier operations
         suspicious_set = set(suspicious_clients)
         malicious_set = set(ground_truth)
         
-        # Confusion matrix
-        true_positives = len(suspicious_set & malicious_set)
-        false_positives = len(suspicious_set - malicious_set)
-        false_negatives = len(malicious_set - suspicious_set)
+        # Calculate confusion matrix components
+        true_positives = len(suspicious_set & malicious_set)  # Correctly identified malicious
+        false_positives = len(suspicious_set - malicious_set)  # Incorrectly flagged as malicious
+        false_negatives = len(malicious_set - suspicious_set)  # Missed malicious clients
         
-        all_identified_clients = suspicious_set | malicious_set
+        # CRITICAL FIX: True negatives calculation
+        # TN = Total clients - all clients that are either suspicious OR actually malicious
+        all_identified_clients = suspicious_set | malicious_set  # Union of both sets
         true_negatives = total_clients - len(all_identified_clients)
         
-        # Metrics
+        logger.info(f"TP (correctly detected malicious): {true_positives}")
+        logger.info(f"FP (incorrectly flagged as malicious): {false_positives}")
+        logger.info(f"FN (missed malicious): {false_negatives}")
+        logger.info(f"TN (correctly identified as benign): {true_negatives}")
+        logger.info(f"Sum: {true_positives + false_positives + false_negatives + true_negatives}")
+        
+        # Validation checks
+        if true_negatives < 0:
+            logger.error(f"INVALID: True negatives is negative ({true_negatives})")
+            logger.error(f"This means total_clients ({total_clients}) < TP+FP+FN ({true_positives + false_positives + false_negatives})")
+            # Set to 0 to prevent negative values
+            true_negatives = max(0, true_negatives)
+        
+        total_check = true_positives + false_positives + false_negatives + true_negatives
+        if total_check != total_clients:
+            logger.warning(f"MISMATCH: Confusion matrix sum ({total_check}) != total_clients ({total_clients})")
+        
+        # Calculate metrics with safe division
         precision = true_positives / len(suspicious_set) if suspicious_set else 0.0
         recall = true_positives / len(malicious_set) if malicious_set else 0.0
         accuracy = (true_positives + true_negatives) / total_clients if total_clients > 0 else 0.0
         
+        # Fix FPR calculation - should be FP / (FP + TN)
         false_positive_rate = false_positives / (false_positives + true_negatives) if (false_positives + true_negatives) > 0 else 0.0
+        
         f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
         
+        # Additional useful metrics
         specificity = true_negatives / (true_negatives + false_positives) if (true_negatives + false_positives) > 0 else 0.0
         
-        logger.info(f"Detection Metrics: Acc={accuracy:.3f}, Prec={precision:.3f}, Rec={recall:.3f}, F1={f1_score:.3f}")
+        logger.info(f"FINAL METRICS:")
+        logger.info(f"  Accuracy: {accuracy:.3f}")
+        logger.info(f"  Precision: {precision:.3f}")
+        logger.info(f"  Recall: {recall:.3f}")
+        logger.info(f"  F1-Score: {f1_score:.3f}")
+        logger.info(f"  FPR: {false_positive_rate:.3f}")
+        logger.info(f"  Specificity: {specificity:.3f}")
+        logger.info(f"=== END METRICS DEBUG ===")
         
         return {
             "accuracy": round(accuracy, 3),
@@ -257,6 +327,7 @@ def create_strategy(config, initial_parameters, testloader=None, malicious_detec
     def fit_config(server_round: int):
         return {
             "server_round": server_round,
+            "round_num": server_round,  # Add round_num for client compatibility
             "local_epochs": config.config_fit.local_epochs,
             "lr": config.config_fit.lr,
             "momentum": config.config_fit.momentum,
@@ -294,7 +365,7 @@ def create_strategy(config, initial_parameters, testloader=None, malicious_detec
     strategy = K8sFederatedStrategy(
         config=config,
         testloader=testloader,
-        malicious_detector=malicious_detector,  # ← ADD DETECTOR
+        malicious_detector=malicious_detector,
         fraction_fit=config.server.fraction_fit,
         fraction_evaluate=config.server.fraction_evaluate,
         min_fit_clients=config.server.min_fit_clients,

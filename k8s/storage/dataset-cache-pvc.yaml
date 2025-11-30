@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dataset-cache-pvc
+  namespace: federated-learning
+spec:
+  accessModes:
+    - ReadWriteMany  # Multiple pods can read
+  resources:
+    requests:
+      storage: 2Gi  # For cached dataset
+  # Note: storageClassName omitted to use default storage class

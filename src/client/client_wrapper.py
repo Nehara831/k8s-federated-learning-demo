@@ -195,6 +195,9 @@ def should_be_malicious(client_id: int, config) -> bool:
     
     malicious_ratio = config.attack.malicious_ratio
     total_clients = config.num_clients
-    num_malicious = int(total_clients * malicious_ratio)
+    num_malicious = max(1, round(total_clients * malicious_ratio))  # At least 1 malicious if enabled
     
-    return client_id < num_malicious
+    # Use modulo to handle hash-based IDs in Kubernetes Deployment mode
+    normalized_id = client_id % total_clients
+    
+    return normalized_id < num_malicious

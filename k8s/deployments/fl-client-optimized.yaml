@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment  # Using Deployment for parallel startup (faster than StatefulSet)
+metadata:
+  name: fl-clients-optimized
+  namespace: federated-learning
+spec:
+  replicas: 10  # Scaled up to 10 clients
+  selector:
+    matchLabels:
+      app: fl-client-optimized
+  template:
+    metadata:
+      labels:
+        app: fl-client-optimized
+    spec:
+      containers:
+      - name: fl-client
+        image: fl-client:latest
+        imagePullPolicy: Never  # Use local Minikube images
+        env:
+        - name: FL_SERVER_ADDRESS
+          value: "fl-server-service:8080"
+        - name: CONFIG_PATH
+          value: "/app/config/k8s-client.yaml"
+        - name: USE_CACHED_DATA
+          value: "true"
+        - name: CACHED_DATA_PATH
+          value: "/shared-data/preprocessed_data.pkl"
+        volumeMounts:
+        - name: client-config
+          mountPath: /app/config
+          readOnly: true
+        - name: dataset-cache
+          mountPath: /shared-data
+          readOnly: true  # Read-only access to preprocessed dataset
+        - name: kaggle-creds
+          mountPath: /root/.kaggle
+          readOnly: true
+        resources:
+          requests:
+            memory: "1Gi"      # Reduced from 3Gi
+            cpu: "500m"        # Reduced from 1000m
+          limits:
+            memory: "2Gi"      # Reduced from 4Gi
+            cpu: "1000m"       # Reduced from 2000m
+      volumes:
+      - name: client-config
+        configMap:
+          name: fl-client-config
+      - name: dataset-cache
+        persistentVolumeClaim:
+          claimName: dataset-cache-pvc  # Shared preprocessed dataset
+      - name: kaggle-creds
+        secret:
+          secretName: kaggle-secret

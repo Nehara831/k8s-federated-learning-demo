@@ -16,18 +16,25 @@ spec:
       restartPolicy: Always  # <-- Must be Always for Deployment!
       containers:
       - name: fl-server
-        image: fl-server:v11  # Changed from v4
+        image: fl-server:latest
         imagePullPolicy: Never
         ports:
         - containerPort: 8080
         env:
         - name: CONFIG_PATH
           value: "/app/config/k8s-server.yaml"
+        - name: USE_CACHED_DATA
+          value: "true"
+        - name: CACHED_DATA_PATH
+          value: "/shared-data/preprocessed_data.pkl"
         volumeMounts:
         - name: server-config
           mountPath: /app/config
         - name: shared-storage
           mountPath: /app/outputs
+        - name: dataset-cache
+          mountPath: /shared-data
+          readOnly: true
         resources:
           requests:
             memory: "2Gi"
@@ -42,3 +49,6 @@ spec:
       - name: shared-storage
         persistentVolumeClaim:
           claimName: fl-shared-pvc
+      - name: dataset-cache
+        persistentVolumeClaim:
+          claimName: dataset-cache-pvc

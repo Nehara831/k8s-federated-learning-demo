@@ -85,49 +85,62 @@ class MaliciousClientDetector:
             return False
 
     def load_distilbert_model(self):
-        """Load trained LoRA DistilBERT model"""
+        """Load LoRA adapter on top of base DistilBERT model"""
         try:
             model_path = getattr(self.model_config, 'model_path', None)
             if not model_path:
                 logger.warning("No model path in config")
                 return
-            
-            model_path = Path(model_path)
-            
-            if not model_path.exists():
-                logger.warning(f"Model path does not exist: {model_path}")
-                return
-            
-            adapter_config_path = model_path / "adapter_config.json"
-            if adapter_config_path.exists():
-                peft_config = PeftConfig.from_pretrained(str(model_path))
-                
-                base_model = AutoModelForSequenceClassification.from_pretrained(
-                    peft_config.base_model_name_or_path,
-                    num_labels=2,
-                    id2label={0: "Benign", 1: "Malicious"},
-                    label2id={"Benign": 0, "Malicious": 1}
-                )
-                
-                self.detector_model = PeftModel.from_pretrained(base_model, str(model_path))
-                self.detector_model.eval()
-                
-                self.tokenizer = AutoTokenizer.from_pretrained(
-                    peft_config.base_model_name_or_path,
-                    add_prefix_space=True
-                )
-                self.tokenizer.truncation_side = "left"
-                
-                if self.tokenizer.pad_token is None:
-                    self.tokenizer.add_special_tokens({'pad_token': '[PAD]'})
-                
-                self.is_trained = True
-                logger.info("✓ Successfully loaded LoRA DistilBERT model")
-                
-        except Exception as e:
-            logger.error(f"Failed to load DistilBERT model: {e}")
-            self.is_trained = False
 
+            # Load tokenizer from adapter directory
+            self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+            # Load base DistilBERT model first
+            base_model_name = "distilbert-base-uncased"
+            logger.info(f"Loading base model: {base_model_name}")
+            base_model = AutoModelForSequenceClassification.from_pretrained(
+                base_model_name,
+                num_labels=2
+            )
+
+            # Load LoRA adapter on top of base model
+            logger.info(f"Loading LoRA adapter from: {model_path}")
+            self.detector_model = PeftModel.from_pretrained(base_model, model_path)
+            
+            # Merge adapter with base model for faster inference
+            logger.info("Merging LoRA adapter with base model...")
+            self.detector_model = self.detector_model.merge_and_unload()
+            
+            self.detector_model.eval()
+            self.is_trained = True
+
+            logger.info("✓ Loaded DistilBERT base model + LoRA adapter (merged)")
+            
+            # DEBUG: Log model statistics to verify it's trained
+            logger.info("🔍 MODEL VERIFICATION:")
+            logger.info(f"  Model type: {type(self.detector_model).__name__}")
+            logger.info(f"  Number of parameters: {sum(p.numel() for p in self.detector_model.parameters())}")
+            if hasattr(self.detector_model, 'classifier'):
+                classifier_weight_mean = self.detector_model.classifier.weight.mean().item()
+                classifier_weight_std = self.detector_model.classifier.weight.std().item()
+                logger.info(f"  Classifier weight mean: {classifier_weight_mean:.6f}")
+                logger.info(f"  Classifier weight std: {classifier_weight_std:.6f}")
+                # Untrained model: mean ~0, std ~0.02
+                # Trained model: mean and std will be different
+                if abs(classifier_weight_mean) < 0.01 and abs(classifier_weight_std - 0.02) < 0.01:
+                    logger.warning("⚠️  Classifier weights look UNTRAINED (mean~0, std~0.02)!")
+                else:
+                    logger.info("✓ Classifier weights appear trained")
+            logger.info(f"  Is trained flag: {self.is_trained}")
+            
+            return
+
+        except Exception as e:
+            logger.error(f"Failed to load model: {e}")
+            logger.exception("Full traceback:")
+            self.is_trained = False
+            return
+        
     def extract_client_features(self, client_id, round_num, current_round_params, prev_round_params):
         """Extract features from client parameters"""
         try:
@@ -214,130 +227,294 @@ class MaliciousClientDetector:
             return 0.0, 0
 
     def scale_features_for_text(self, raw_features):
-        """Scale features before creating text"""
+        """Scale features exactly like the evaluation code before creating text"""
         try:
             if not self.scaler_fitted or self.feature_scaler is None:
                 logger.error("Scaler not fitted! Cannot scale features.")
                 return None
-            
-            feature_dict = {k: v for k, v in raw_features.items() 
-                          if k not in ['client_id']}
-            
+
+            # Only keep features expected by the scaler
+            feature_dict = {k: raw_features[k] for k in self.feature_scaler.feature_names_in_ if k in raw_features}
             feature_df = pd.DataFrame([feature_dict])
             numerical_cols = feature_df.select_dtypes(include=['float64', 'int64', 'float32']).columns
-            
             feature_df[numerical_cols] = self.feature_scaler.transform(feature_df[numerical_cols])
             scaled_features = feature_df.iloc[0].to_dict()
-            
             return scaled_features
-            
         except Exception as e:
             logger.error(f"Failed to scale features: {e}")
             return None
 
     def update_client_behavior(self, client_id, round_num, current_round_params, prev_round_params):
-        """Update client behavior tracking"""
+        """Update client behavior tracking with PROPER SCALING"""
+        
+        # Extract RAW features first
         curr_param_dict = self._convert_params_to_dict(current_round_params)
         prev_param_dict = self._convert_params_to_dict(prev_round_params)
         
+        # If prev_round_params was None, prev_param_dict will be empty - pass None instead
+        if prev_round_params is None:
+            prev_param_dict = None
+            
         raw_features = self.extract_client_features(client_id, round_num, curr_param_dict, prev_param_dict)
         if not raw_features:
-            logger.warning(f"No features extracted for client {client_id}")
-            return 0
+            logger.warning(f"Features are empty, can't predict the output")
+            return 0.0
         
+        
+        # CRITICAL: Scale the features BEFORE creating text (same as evaluation code)
         scaled_features = self.scale_features_for_text(raw_features)
         if scaled_features is None:
             logger.warning(f"Failed to scale features for client {client_id}")
-            return 0
+            return 0.0
+        # print("scaled_features+",scaled_features)
 
+        # Create behavior description with SCALED values (same as training)
         behavior_description = self.create_behavior_description(scaled_features)
+        
+        # DEBUG: Print the scaled text being sent to model
+        # logger.info(f"Client {client_id} SCALED behavior text: {behavior_description[:200]}...")
+        
         self.client_behaviors[client_id].append(behavior_description)
         
+        # Store for analysis
         self.round_data.append({
             'client_id': client_id,
             'round': round_num,
             'behavior_text': behavior_description,
-            'raw_features': raw_features,
-            'scaled_features': scaled_features
+            'raw_features': raw_features,  # Store raw
+            'scaled_features': scaled_features  # Store scaled
         })
         
+        # If model is trained, get detection score
         if self.is_trained:
+            # DEBUG: Log feature sample for first client to compare with simulation
+            if client_id == 0 and round_num <= 3:
+                logger.info(f"🔍 FEATURE DEBUG Client {client_id} Round {round_num}:")
+                logger.info(f"  param_mean: {scaled_features.get('param_mean', 0):.6f}")
+                logger.info(f"  param_std: {scaled_features.get('param_std', 0):.6f}")
+                logger.info(f"  avg_l1_distance: {scaled_features.get('avg_l1_distance', 0):.6f}")
+                logger.info(f"  cosine_similarity: {scaled_features.get('cosine_similarity', 0):.6f}")
+            
             malicious_prob, predicted_class = self.detect_malicious_behavior(behavior_description)
             
-            if predicted_class == 1:
+            logger.info(f"Client {client_id}: prob={malicious_prob:.3f}, prediction={predicted_class}")
+            
+            if predicted_class == 1:  # Malicious
                 if client_id not in self.current_round_malicious:
                     self.current_round_malicious.append(client_id)
                     logger.warning(f"Client {client_id} flagged as MALICIOUS in round {round_num}")
-            else:
-                logger.info(f"Client {client_id} appears BENIGN in round {round_num}")
                 
+            else:  # Benign
+                logger.info(f"Client {client_id} appears BENIGN in round {round_num}")
             return predicted_class
+        else:
+            logger.warning(f"Detector not trained, skipping detection for client {client_id}")
         
         return 0
 
-    def get_suspicious_clients(self):
-        """Get list of malicious clients in current round"""
-        return self.current_round_malicious
-
-    def start_new_round(self, round_num):
-        """Reset detection for new round"""
-        if self.current_round_malicious:
-            self.malicious_history[round_num - 1] = self.current_round_malicious.copy()
-        
-        self.current_round_malicious = []
-        logger.info(f"Started round {round_num} - reset malicious detection")
+    def fit_feature_scaler(self):
+        """Fit the MinMax scaler using collected raw features"""
+        try:
+            if len(self.raw_features_buffer) < self.min_samples_for_scaler:
+                logger.warning(f"Insufficient samples to fit scaler: {len(self.raw_features_buffer)} < {self.min_samples_for_scaler}")
+                return False
+            
+            # Convert raw features to DataFrame
+            raw_df = pd.DataFrame(self.raw_features_buffer)
+            
+            # Select only numeric columns for scaling
+            numeric_cols = [col for col in raw_df.columns if col not in ['client_id', 'round_num']]
+            numeric_data = raw_df[numeric_cols].values
+            
+            # Fit the scaler
+            self.feature_scaler.fit(numeric_data)
+            self.scaler_fitted = True
+            
+            logger.info(f"MinMax scaler fitted with {len(self.raw_features_buffer)} samples")
+            logger.info(f"Scaling {len(numeric_cols)} numeric features: {numeric_cols[:5]}...")  # Show first 5
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to fit feature scaler: {e}")
+            return False
 
     def _extract_layer_names_from_model(self, model):
-        """Extract layer names from model"""
+        """Extract ALL state_dict keys from the provided model instance"""
         try:
             self.layer_names = []
             
-            if hasattr(model, 'named_parameters'):
-                for name, param in model.named_parameters():
-                    self.layer_names.append(name)
-                return
-            
+            # Use state_dict to get ALL keys (weights, biases, AND buffers)
             if hasattr(model, 'state_dict'):
                 state_dict = model.state_dict()
                 self.layer_names = list(state_dict.keys())
+                logger.info(f"Extracted {len(self.layer_names)} parameter names from state_dict")
+                logger.debug(f"Parameter names: {self.layer_names[:5]}...")  # Show first 5
                 return
             
+            logger.warning("Could not extract layer names from model - no state_dict method found")
+            
         except Exception as e:
-            logger.error(f"Failed to extract layer names: {e}")
+            logger.error(f"Failed to extract layer names from model: {e}")
+            self.layer_names = None
 
     def _convert_params_to_dict(self, param_list):
-        """Convert parameter list to dictionary"""
+        """Convert Flower parameter list to dictionary format using actual layer names"""
+        if param_list is None:
+            logger.warning("param_list is None - returning empty dict")
+            return {}
+            
         if isinstance(param_list, dict):
             return param_list
         
         param_dict = {}
         
-        if self.layer_names and len(param_list) == len(self.layer_names):
-            for name, param in zip(self.layer_names, param_list):
-                param_dict[name] = param
+        # Get expected parameter names from the model
+        if self.layer_names and len(param_list) > 0:
+            # Flower sends ALL state_dict items in the same order as model.state_dict().items()
+            # This includes weights, biases, AND BatchNorm buffers
+            expected_param_count = len(self.layer_names)
+            
+            if len(param_list) == expected_param_count:
+                # Perfect match - use actual layer names
+                for name, param in zip(self.layer_names, param_list):
+                    param_dict[name] = param
+                logger.debug(f"Mapped {len(param_list)} parameters using model layer names")
+                
+            else:
+                # Mismatch detected - need to handle this carefully
+                logger.warning(
+                    f"Parameter count mismatch: {len(param_list)} params vs "
+                    f"{expected_param_count} expected layer names"
+                )
+                
+                # CRITICAL FIX: Re-extract layer names to include ALL state_dict keys
+                # including BatchNorm buffers
+                if hasattr(self, 'model_config') and hasattr(self.model_config, 'model_instance'):
+                    model = self.model_config.model_instance
+                    all_keys = list(model.state_dict().keys())
+                    
+                    if len(param_list) == len(all_keys):
+                        for name, param in zip(all_keys, param_list):
+                            param_dict[name] = param
+                        logger.info(f"✓ Mapped using complete state_dict keys (including BatchNorm)")
+                        return param_dict
+                
+                # Fallback: use generic names
+                for i, param in enumerate(param_list):
+                    param_dict[f'layer_{i}'] = param
+                logger.warning("Using generic layer names - feature extraction may be incomplete")
         else:
+            # No layer names available
             for i, param in enumerate(param_list):
                 param_dict[f'layer_{i}'] = param
+            logger.info("No layer names available, using generic names")
         
         return param_dict
-
+    
     def save_performance_metrics(self, metrics, round_num):
-        """Save detection metrics to log file"""
+        """Log metrics for a specific round to file"""
+        # Format results as text
         metrics_text = (
             f"Round {round_num:2d} | "
             f"Accuracy: {metrics['accuracy']:.3f} | "
             f"Precision: {metrics['precision']:.3f} | "
             f"Recall: {metrics['recall']:.3f} | "
-            f"F1: {metrics['f1_score']:.3f} | "
+            f"F1-Score: {metrics['f1_score']:.3f} | "
             f"FPR: {metrics['false_positive_rate']:.3f} | "
-            f"TP: {metrics['true_positives']} | "
-            f"FP: {metrics['false_positives']} | "
-            f"FN: {metrics['false_negatives']} | "
-            f"TN: {metrics['true_negatives']}"
+            f"TP: {metrics['true_positives']:2d} | "
+            f"FP: {metrics['false_positives']:2d} | "
+            f"FN: {metrics['false_negatives']:2d} | "
+            f"TN: {metrics['true_negatives']:2d}   | "
+            f"True Malicious Clients{metrics['true_malicious_clients_set']}  | "
+            f"Model Predicted Malicious clients{metrics['suspicious_set'] }"
+
         )
         
-        log_file = self.save_dir / "detection_metrics.log"
+        log_file = os.path.join(self.save_dir, "detection_metrics.log")
+        
+        # Append metrics for current round
         with open(log_file, 'a') as f:
             f.write(metrics_text + "\n")
         
-        logger.info(metrics_text)
+        # Also print to console
+        print(metrics_text)
+
+    def finalize_metrics_log(self):
+        """Add summary footer to the metrics log"""
+        log_file = os.path.join(self.save_dir, "detection_metrics.log")
+        
+        if os.path.exists(log_file):
+            with open(log_file, 'a') as f:
+                f.write("\n" + "=" * 80 + "\n")
+                f.write(f"Training completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write("=" * 80 + "\n")
+
+    def debug_scaler_info(self):
+        """Debug method to check scaler state"""
+        logger.info("=== SCALER DEBUG INFO ===")
+        logger.info(f"Scaler fitted: {self.scaler_fitted}")
+        logger.info("Scaler expects: %s", self.feature_scaler.feature_names_in_)
+
+        if hasattr(self.feature_scaler, 'data_min_'):
+            logger.info(f"Scaler type: {type(self.feature_scaler)}")
+            logger.info(f"Data min shape: {self.feature_scaler.data_min_.shape}")
+            logger.info(f"Data max shape: {self.feature_scaler.data_max_.shape}")
+            logger.info(f"First 5 data_min: {self.feature_scaler.data_min_[:5]}")
+            logger.info(f"First 5 data_max: {self.feature_scaler.data_max_[:5]}")
+        else:
+            logger.info("Scaler has no data_min_ attribute")
+        
+        logger.info("========================")
+
+
+    def start_new_round(self, round_num):
+        """Call this at the beginning of each round to reset detection"""
+        if self.current_round_malicious:
+            # Save previous round's results
+            self.malicious_history[round_num - 1] = self.current_round_malicious.copy()
+            logger.info(f"Saved round {round_num - 1} malicious clients: {self.current_round_malicious}")
+        
+        # Reset for new round
+        self.current_round_malicious = []
+        logger.info(f"Started round {round_num} - reset malicious client detection")
+
+    def get_suspicious_clients(self, threshold=0.7):
+        """Get list of clients flagged as malicious in the current round"""
+        logger.info(f"Current round malicious clients: {self.current_round_malicious}")
+        return self.current_round_malicious
+    
+    def clear_malicious_clients(self):
+        """Clear the current round malicious clients list"""
+        self.current_round_malicious.clear()
+        logger.info("Cleared current round malicious clients list")
+    
+    def get_client_analysis(self, client_id):
+        """Get detailed analysis for a specific client"""
+        if client_id in self.client_behaviors:
+            return {
+                'behaviors': self.client_behaviors[client_id],
+                'is_malicious': client_id in self.current_round_malicious,
+                'total_rounds': len(self.client_behaviors[client_id])
+            }
+        return None
+    
+    def save_analysis_results(self, round_num):
+        """Save analysis results for the round"""
+        analysis_data = {
+            'round': round_num,
+            'malicious_clients': self.current_round_malicious.copy(),
+            'total_behaviors_tracked': len(self.round_data),
+            'model_trained': self.is_trained,
+            'clients_analyzed': len(self.client_behaviors)
+        }
+        
+        # Save to file
+        analysis_path = self.save_dir / f"round_{round_num}_analysis.json"
+        with open(analysis_path, 'w') as f:
+            json.dump(analysis_data, f, indent=2)
+        
+        if self.current_round_malicious:
+            logger.warning(f"Round {round_num}: Malicious clients detected: {self.current_round_malicious}")
+        
+        return analysis_data

@@ -57,3 +57,5 @@ kagglehub/
 outputs/
 models/
 logs/
+
+minikube-linux-amd64

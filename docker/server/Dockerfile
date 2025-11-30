@@ -9,19 +9,27 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 COPY docker/server/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install with increased timeout and retries for large packages like PyTorch
+RUN pip install --no-cache-dir --timeout=1000 --retries=5 -r requirements.txt
 
 # Copy source code
 COPY src/ ./src/
 COPY config/ ./config/
 COPY modules/ ./modules/
-COPY datasets/ ./datasets/
 
-# Create directories for detector
-RUN mkdir -p /app/outputs/detector
-RUN mkdir -p /app/detector_model
+# Create directories for data and outputs
+RUN mkdir -p /app/data
+RUN mkdir -p /app/outputs
+RUN mkdir -p /app/detector_output
 
-# If you have a pre-trained detector model, copy it here:
+# Copy detector model directly into the image
 COPY detector_model/ /app/detector_model/
+
+# Pre-download DistilBERT base model during build (cached in image)
+RUN python -c "from transformers import AutoTokenizer, AutoModelForSequenceClassification; \
+    print('Downloading DistilBERT base model...'); \
+    AutoTokenizer.from_pretrained('distilbert-base-uncased'); \
+    AutoModelForSequenceClassification.from_pretrained('distilbert-base-uncased', num_labels=2); \
+    print('✓ Base model cached in image')"
 
 CMD ["python", "-m", "src.server.server_main"]

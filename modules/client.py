@@ -36,10 +36,19 @@ class FlowerClient(fl.client.NumPyClient):
     def set_parameters(self, parameters):
         """Set model parameters from numpy arrays"""
         params_dict = zip(self.model.state_dict().keys(), parameters)
-        state_dict = {k: torch.tensor(v) for k, v in params_dict}
+        state_dict = {}
+        
+        for k, v in params_dict:
+            # Handle BatchNorm num_batches_tracked with correct dtype
+            if 'num_batches_tracked' in k:
+                state_dict[k] = torch.tensor(v, dtype=torch.long)
+            else:
+                state_dict[k] = torch.tensor(v)
+        
         self.model.load_state_dict(state_dict, strict=True)
 
     def fit(self, parameters, config):
+        
         """Train the model on local data"""
         self.set_parameters(parameters)
         logger.info(f"Client {self.client_id} starting training round")

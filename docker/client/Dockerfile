@@ -10,13 +10,18 @@ RUN apt-get update && apt-get install -y \
 
 # Copy requirements
 COPY docker/client/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+
+# Install with increased timeout and retries for large packages like PyTorch
+RUN pip install --no-cache-dir --timeout=1000 --retries=5 -r requirements.txt
 
 # Copy source code
 COPY src/ ./src/
 COPY config/ ./config/
 COPY modules/ ./modules/
-COPY datasets/ ./datasets/
+
+# Create directories for data and outputs
+RUN mkdir -p /app/data
+RUN mkdir -p /app/outputs
 
 # Set Python path
 ENV PYTHONPATH=/app

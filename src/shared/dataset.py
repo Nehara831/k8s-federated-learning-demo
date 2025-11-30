@@ -154,18 +154,41 @@ def get_client_dataset(client_id: int, config):
     elif config.dataset.type == "5gnidd":
         logger.info("Loading 5G-NIDD dataset...")
         
-        # Download dataset
-        data_path = config.dataset.get('data_dir', '/app/data')
-        dataset_path, dataset_files = download_5gnidd_dataset(data_path)
+        # Check for cached preprocessed data first
+        use_cache = os.environ.get('USE_CACHED_DATA', 'false').lower() == 'true'
+        cache_path = os.environ.get('CACHED_DATA_PATH', '/shared-data/preprocessed_data.pkl')
         
-        if dataset_path is None:
-            raise ValueError("Failed to download 5G-NIDD dataset")
+        if use_cache and os.path.exists(cache_path):
+            logger.info(f"Loading preprocessed data from cache: {cache_path}")
+            try:
+                import pickle
+                with open(cache_path, 'rb') as f:
+                    cached = pickle.load(f)
+                X = cached['X']
+                y = cached['y']
+                logger.info(f"Loaded cached data: X shape {X.shape}, y shape {y.shape}")
+            except Exception as e:
+                logger.warning(f"Failed to load cached data: {e}")
+                logger.info("Falling back to download and preprocess...")
+                use_cache = False
+        else:
+            if use_cache:
+                logger.warning(f"Cache enabled but file not found: {cache_path}")
+            use_cache = False
         
-        # Load and preprocess
-        X, y, scaler = load_and_preprocess_5gnidd(dataset_path, dataset_files)
-        
-        if X is None:
-            raise ValueError("Failed to preprocess 5G-NIDD dataset")
+        if not use_cache:
+            # Download dataset
+            data_path = config.dataset.get('data_dir', '/app/data')
+            dataset_path, dataset_files = download_5gnidd_dataset(data_path)
+            
+            if dataset_path is None:
+                raise ValueError("Failed to download 5G-NIDD dataset")
+            
+            # Load and preprocess
+            X, y, scaler = load_and_preprocess_5gnidd(dataset_path, dataset_files)
+            
+            if X is None:
+                raise ValueError("Failed to preprocess 5G-NIDD dataset")
         
         # Split into train/test
         X_train, X_test, y_train, y_test = train_test_split(
@@ -183,22 +206,34 @@ def get_client_dataset(client_id: int, config):
     else:
         raise ValueError(f"Unsupported dataset: {config.dataset.type}")
     
-    # Partition dataset for this client
-    partition_size = len(trainset) // config.num_clients
+    # Partition dataset for this client using IID (random_split with fixed seed)
+    # This matches the simulation's approach for fair comparison
+    num_clients = config.num_clients
+    partition_size = len(trainset) // num_clients
+    remainder = len(trainset) % num_clients
+    
+    # Create partition lengths (last client gets extra samples)
+    partition_lengths = [partition_size] * num_clients
+    partition_lengths[-1] += remainder
+    
+    logger.info(f"Total samples: {len(trainset)}, Clients: {num_clients}")
+    logger.info(f"Partition lengths: {partition_lengths}")
+    
+    # Use random_split with fixed seed for reproducible IID partitioning
+    all_partitions = torch.utils.data.random_split(
+        trainset, 
+        partition_lengths,
+        generator=torch.Generator().manual_seed(123)
+    )
     
     # With StatefulSet, client_id is already 0, 1, 2, ... (no modulo needed)
     # But add modulo as safety for Deployment fallback
-    effective_client_id = client_id % config.num_clients
+    effective_client_id = client_id % num_clients
     
-    start_idx = effective_client_id * partition_size
-    end_idx = start_idx + partition_size if effective_client_id < config.num_clients - 1 else len(trainset)
+    # Get this client's partition
+    client_trainset = all_partitions[effective_client_id]
     
-    logger.info(f"Client {client_id}: partition [{start_idx}:{end_idx}] of {len(trainset)} samples")
-    
-    indices = list(range(start_idx, end_idx))
-    client_trainset = torch.utils.data.Subset(trainset, indices)
-    
-    logger.info(f"Client {client_id} dataset size: {len(client_trainset)}")
+    logger.info(f"Client {client_id} (effective: {effective_client_id}) dataset size: {len(client_trainset)}")
     
     if len(client_trainset) == 0:
         raise ValueError(f"Client {client_id} has empty dataset! Check partitioning logic.")
@@ -243,18 +278,41 @@ def prepare_server_dataset(config):
     elif config.dataset.type == "5gnidd":
         logger.info("Loading 5G-NIDD test dataset...")
         
-        # Download dataset
-        data_path = config.dataset.get('data_dir', './data')
-        dataset_path, dataset_files = download_5gnidd_dataset(data_path)
+        # Check for cached preprocessed data first
+        use_cache = os.environ.get('USE_CACHED_DATA', 'false').lower() == 'true'
+        cache_path = os.environ.get('CACHED_DATA_PATH', '/shared-data/preprocessed_data.pkl')
         
-        if dataset_path is None:
-            raise ValueError("Failed to download 5G-NIDD dataset")
+        if use_cache and os.path.exists(cache_path):
+            logger.info(f"Loading preprocessed data from cache: {cache_path}")
+            try:
+                import pickle
+                with open(cache_path, 'rb') as f:
+                    cached = pickle.load(f)
+                X = cached['X']
+                y = cached['y']
+                logger.info(f"Loaded cached data: X shape {X.shape}, y shape {y.shape}")
+            except Exception as e:
+                logger.warning(f"Failed to load cached data: {e}")
+                logger.info("Falling back to download and preprocess...")
+                use_cache = False
+        else:
+            if use_cache:
+                logger.warning(f"Cache enabled but file not found: {cache_path}")
+            use_cache = False
         
-        # Load and preprocess
-        X, y, scaler = load_and_preprocess_5gnidd(dataset_path, dataset_files)
-        
-        if X is None:
-            raise ValueError("Failed to preprocess 5G-NIDD dataset")
+        if not use_cache:
+            # Download dataset
+            data_path = config.dataset.get('data_dir', './data')
+            dataset_path, dataset_files = download_5gnidd_dataset(data_path)
+            
+            if dataset_path is None:
+                raise ValueError("Failed to download 5G-NIDD dataset")
+            
+            # Load and preprocess
+            X, y, scaler = load_and_preprocess_5gnidd(dataset_path, dataset_files)
+            
+            if X is None:
+                raise ValueError("Failed to preprocess 5G-NIDD dataset")
         
         # Split into train/test
         X_train, X_test, y_train, y_test = train_test_split(

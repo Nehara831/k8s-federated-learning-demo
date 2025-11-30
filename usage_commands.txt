@@ -1,23 +1,34 @@
-# Make scripts executable
-chmod +x scripts/*.sh
 
-# Build and deploy
-./scripts/build-images.sh
-./scripts/deploy.sh
+View pods:
+  kubectl get pods -n federated-learning
 
-# Monitor the deployment
-kubectl get pods -n federated-learning -w
+View server logs:
+  kubectl logs -f deployment/fl-server -n federated-learning
 
-# Check logs
-kubectl logs -f deployment/fl-server -n federated-learning
-kubectl logs -f deployment/fl-clients -n federated-learning
+View client logs:
+  kubectl logs -f deployment/fl-clients-optimized -n federated-learning
 
-# Scale clients
-./scripts/scale-clients.sh 15
+Scale clients:
+  kubectl scale deployment fl-clients-optimized --replicas=30 -n federated-learning
 
-# Cleanup
-./scripts/cleanup.sh
+Check status:
+  kubectl get all -n federated-learning
 
 
+kubectl logs -f fl-clients-optimized-6d56d8c74-4l5bb -n federated-learning
+kubectl logs -f fl-server-6b974b78b9-8mb7t -n federated-learning
+
+eval $(minikube docker-env) && docker build -t fl-server:latest -f docker/server/Dockerfile .
+kubectl rollout restart deployment/fl-server -n federated-learning
+kubectl wait --for=condition=available deployment/fl-server -n federated-learning --timeout=60s
+kubectl rollout restart deployment/fl-clients-optimized -n federated-learning
+kubectl wait --for=condition=available deployment/fl-clients-optimized -n federated-learning --timeout=60s
 
 
+-------To apply the updated server config --------
+kubectl create configmap fl-server-config --from-file=config/k8s-server.yaml -n federated-learning --dry-run=client -o yaml | kubectl apply -f -
+
+-------To apply the updated client config-----
+kubectl create configmap fl-client-config --from-file=config/k8s-client.yaml -n federated-learning --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl apply -f k8s/deployments/fl-client-optimized.yaml -n federated-learning
