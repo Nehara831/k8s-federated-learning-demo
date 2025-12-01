@@ -18,7 +18,7 @@ metadata:
   namespace: federated-learning
 spec:
   serviceName: fl-client-headless
-  replicas: 3  # Scale to 3 clients
+  replicas: 10  # Scale to 10 clients
   selector:
     matchLabels:
       app: fl-client
@@ -29,25 +29,31 @@ spec:
     spec:
       containers:
       - name: fl-client
-        image: fl-client:v9
+        image: fl-client:latest
         imagePullPolicy: Never
         env:
         - name: FL_SERVER_ADDRESS
           value: "fl-server-service:8080"
         - name: CONFIG_PATH
           value: "/app/config/k8s-client.yaml"
+        - name: USE_CACHED_DATA
+          value: "true"
+        - name: CACHED_DATA_PATH
+          value: "/shared-data/preprocessed_data.pkl"
         volumeMounts:
+        - name: shared-data
+          mountPath: /shared-data
         - name: client-config
           mountPath: /app/config
         - name: shared-storage
           mountPath: /app/outputs
         resources:
           requests:
-            memory: "3Gi"
-            cpu: "1000m"
+            memory: "1Gi"      # Reduced from 3Gi
+            cpu: "500m"        # Reduced from 1000m
           limits:
-            memory: "4Gi"
-            cpu: "2000m"
+            memory: "1.5Gi"    # Reduced from 4Gi
+            cpu: "1000m"       # Reduced from 2000m
       volumes:
       - name: client-config
         configMap:
@@ -55,3 +61,6 @@ spec:
       - name: shared-storage
         persistentVolumeClaim:
           claimName: fl-shared-pvc
+      - name: shared-data
+        persistentVolumeClaim:
+          claimName: dataset-cache-pvc

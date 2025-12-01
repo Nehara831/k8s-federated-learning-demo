@@ -1,4 +1,4 @@
-FROM python:3.9-slim
+FROM python:3.10-slim
 
 WORKDIR /app
 
@@ -10,8 +10,6 @@ RUN apt-get update && apt-get install -y \
 
 # Copy requirements
 COPY docker/client/requirements.txt .
-
-# Install with increased timeout and retries for large packages like PyTorch
 RUN pip install --no-cache-dir --timeout=1000 --retries=5 -r requirements.txt
 
 # Copy source code

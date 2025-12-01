@@ -46,13 +46,19 @@ class K8sFlowerClient(FlowerClient):
             nds = parameters_to_ndarrays(parameters.parameters)
             cfg = dict(parameters.config)
             new_params, num_examples, metrics = super().fit(nds, cfg)
+            # CRITICAL: Add client_id to metrics for deterministic identification
+            metrics["client_id"] = str(self.client_id)
             return FitRes(
                 status=Status(code=Code.OK, message=""),
                 parameters=ndarrays_to_parameters(new_params),
                 num_examples=num_examples,
                 metrics=metrics,
             )
-        return super().fit(parameters, config or {})
+        # Fallback path: parameters is already ndarrays
+        new_params, num_examples, metrics = super().fit(parameters, config or {})
+        # CRITICAL: Add client_id to metrics here too!
+        metrics["client_id"] = str(self.client_id)
+        return new_params, num_examples, metrics
     
     # Shim EvaluateIns -> NumPyClient.evaluate
     def evaluate(self, parameters, config=None):
@@ -101,13 +107,19 @@ class K8sMaliciousClient(MaliciousClient):
             nds = parameters_to_ndarrays(parameters.parameters)
             cfg = dict(parameters.config)
             new_params, num_examples, metrics = super().fit(nds, cfg)
+            # CRITICAL: Add client_id to metrics for deterministic identification
+            metrics["client_id"] = str(self.client_id)
             return FitRes(
                 status=Status(code=Code.OK, message=""),
                 parameters=ndarrays_to_parameters(new_params),
                 num_examples=num_examples,
                 metrics=metrics,
             )
-        return super().fit(parameters, config or {})
+        # Fallback path: parameters is already ndarrays
+        new_params, num_examples, metrics = super().fit(parameters, config or {})
+        # CRITICAL: Add client_id to metrics here too!
+        metrics["client_id"] = str(self.client_id)
+        return new_params, num_examples, metrics
 
     def evaluate(self, parameters, config=None):
         if isinstance(parameters, EvaluateIns):

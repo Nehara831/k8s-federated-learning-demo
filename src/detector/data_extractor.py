@@ -27,9 +27,9 @@ def extract_model_features(params, client_id, round_num, reference_params=None):
     features["param_range"] = features["param_max"] - features["param_min"]
     features["param_abs_mean"] = np.mean(np.abs(all_params))
     
-    # Distribution features
-    features["param_skew"] = np.mean((all_params - features["param_mean"])**3) / (features["param_std"]**3 + 1e-8)
-    features["param_kurtosis"] = np.mean((all_params - features["param_mean"])**4) / (features["param_std"]**4 + 1e-8)
+    # Distribution features - MUST MATCH SIMULATION EXACTLY (no epsilon)
+    features["param_skew"] = np.mean((all_params - features["param_mean"])**3) / (features["param_std"]**3)
+    features["param_kurtosis"] = np.mean((all_params - features["param_mean"])**4) / (features["param_std"]**4)
     features["param_neg_ratio"] = np.sum(all_params < 0) / len(all_params)
     features["param_zero_ratio"] = np.sum(np.abs(all_params) < 1e-6) / len(all_params)
     

@@ -7,7 +7,7 @@ View server logs:
 
 View client logs:
   kubectl logs -f deployment/fl-clients-optimized -n federated-learning
-
+ 
 Scale clients:
   kubectl scale deployment fl-clients-optimized --replicas=30 -n federated-learning
 
@@ -15,7 +15,7 @@ Check status:
   kubectl get all -n federated-learning
 
 
-kubectl logs -f fl-clients-optimized-6d56d8c74-4l5bb -n federated-learning
+kubectl logs -f fl-clients-0 -n federated-learning
 kubectl logs -f fl-server-6b974b78b9-8mb7t -n federated-learning
 
 eval $(minikube docker-env) && docker build -t fl-server:latest -f docker/server/Dockerfile .
@@ -23,6 +23,8 @@ kubectl rollout restart deployment/fl-server -n federated-learning
 kubectl wait --for=condition=available deployment/fl-server -n federated-learning --timeout=60s
 kubectl rollout restart deployment/fl-clients-optimized -n federated-learning
 kubectl wait --for=condition=available deployment/fl-clients-optimized -n federated-learning --timeout=60s
+
+kubectl delete pods -l app=fl-client -n federated-learning
 
 
 -------To apply the updated server config --------
@@ -32,3 +34,10 @@ kubectl create configmap fl-server-config --from-file=config/k8s-server.yaml -n 
 kubectl create configmap fl-client-config --from-file=config/k8s-client.yaml -n federated-learning --dry-run=client -o yaml | kubectl apply -f -
 
 kubectl apply -f k8s/deployments/fl-client-optimized.yaml -n federated-learning
+
+
+kubectl scale deployment fl-server --replicas=0 -n federated-learning && kubectl scale statefulset fl-clients --replicas=0 -n federated-learning && echo "Scaled down server and clients to 0" && kubectl get pods -n federated-learning
+
+
+kubectl delete pods -l app=fl-client -n federated-learning
+kubectl rollout restart statefulset/fl-clients -n federated-learning

@@ -48,23 +48,28 @@ class FlowerClient(fl.client.NumPyClient):
         self.model.load_state_dict(state_dict, strict=True)
 
     def fit(self, parameters, config):
-        
         """Train the model on local data"""
         self.set_parameters(parameters)
         logger.info(f"Client {self.client_id} starting training round")
         logger.info(f"Client {self.client_id} - Training dataset size: {len(self.trainloader.dataset)}")
         logger.info(f"Client {self.client_id} - Number of batches: {len(self.trainloader)}")
-        logger.info(f"Client {self.client_id} - Epochs: {self.epochs}, LR: {self.lr}")
+        
+        # Get training config
+        lr = config.get("lr", 0.01)
+        momentum = config.get("momentum", 0.9)
+        local_epochs = config.get("local_epochs", 1)
+        
+        logger.info(f"Client {self.client_id} - Epochs: {local_epochs}, LR: {lr}")
         
         # Train the model
         self.model.train()
-        optimizer = optim.SGD(self.model.parameters(), lr=config.get("lr", 0.01), momentum=config.get("momentum", 0.9))
+        optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=momentum)
         
         total_loss = 0.0
         num_batches = 0
         
-        for epoch in range(config.get("local_epochs", 1)):
-            logger.info(f"Client {self.client_id} - Starting epoch {epoch+1}/{self.epochs}")
+        for epoch in range(local_epochs):
+            logger.info(f"Client {self.client_id} - Starting epoch {epoch+1}/{local_epochs}")
             epoch_loss = 0.0
             epoch_batches = 0
             
@@ -82,20 +87,42 @@ class FlowerClient(fl.client.NumPyClient):
                 num_batches += 1
                 epoch_batches += 1
                 
-                # Log every 5 batches for more visibility
                 if batch_idx % 2 == 0:
-                    logger.info(f"Client {self.client_id} - Epoch {epoch+1}/{self.epochs}, Batch {batch_idx}/{len(self.trainloader)}, Loss: {loss.item():.6f}")
+                    logger.info(f"Client {self.client_id} - Epoch {epoch+1}/{local_epochs}, Batch {batch_idx}/{len(self.trainloader)}, Loss: {loss.item():.6f}")
             
-            # Log epoch summary
             avg_epoch_loss = epoch_loss / epoch_batches if epoch_batches > 0 else 0.0
             logger.info(f"Client {self.client_id} - Epoch {epoch+1} complete. Avg loss: {avg_epoch_loss:.6f}")
         
-        avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
-        logger.info(f"Client {self.client_id} training complete. Total batches: {num_batches}, Avg loss: {avg_loss:.6f}")
-        logger.info(f"Client {self.client_id} - Returning updated parameters to server")
+        # ✅ ADD VALIDATION AFTER TRAINING (matching simulation)
+        self.model.eval()
+        val_loss = 0.0
+        val_correct = 0
+        val_total = 0
         
-        # Return updated parameters and training metrics
-        return self.get_parameters(config), len(self.trainloader.dataset), {}
+        with torch.no_grad():
+            for data, target in self.valloader:
+                data, target = data.to(self.device), target.to(self.device)
+                output = self.model(data)
+                loss = self.criterion(output, target)
+                val_loss += loss.item()
+                
+                _, predicted = torch.max(output.data, 1)
+                val_total += target.size(0)
+                val_correct += (predicted == target).sum().item()
+        
+        local_accuracy = float(val_correct) / val_total if val_total > 0 else 0.0
+        local_loss = val_loss / len(self.valloader) if len(self.valloader) > 0 else 0.0
+        
+        logger.info(f"Client {self.client_id} - Validation complete. Accuracy: {local_accuracy:.4f}, Loss: {local_loss:.6f}")
+        
+        # Return metrics matching simulation
+        metrics = {
+            "local_accuracy": float(local_accuracy),
+            "local_loss": float(local_loss),
+        }
+        
+        logger.info(f"Client {self.client_id} - Returning updated parameters to server")
+        return self.get_parameters(config), len(self.trainloader.dataset), metrics
 
     def evaluate(self, parameters, config=None):  # ✅ Made optional with default
         """Evaluate the model on local validation data"""

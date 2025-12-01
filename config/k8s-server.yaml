@@ -26,6 +26,6 @@ detector:
   enabled: true  
   save_dir: "/app/detector_output"
   model:
-    model_path: "/app/detector_model/finetuned_model_5gnidd_variant_merged_training"  # Path to merged LoRA model
+    model_path: "/app/detector_model/finetuned_model_5gnidd_variant_merged_training"  
   min_rounds_before_detection: 2  
   use_simple_model_if_no_pretrained: false

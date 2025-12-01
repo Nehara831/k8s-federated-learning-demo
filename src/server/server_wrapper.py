@@ -17,7 +17,7 @@ class K8sFederatedStrategy(FedAvg):
         self.testloader = testloader
         self.malicious_detector = malicious_detector
         self._saved_initial_parameters = kwargs.get('initial_parameters')
-        self.round_models = {}  # Store models from each round
+        self.round_models = {}  # Store global aggregated models from each round
         
         super().__init__(**kwargs)
     
@@ -96,15 +96,21 @@ class K8sFederatedStrategy(FedAvg):
         all_client_ids = []
         
         for client_proxy, fit_res in results:
-            client_id_str = str(client_proxy.cid)
+            # CRITICAL: Use deterministic client_id from properties for consistency
+            client_id_from_props = fit_res.metrics.get("client_id", None)
+            if client_id_from_props is not None:
+                client_id_str = str(client_id_from_props)  # Use deterministic ID
+            else:
+                client_id_str = str(client_proxy.cid)  # Fallback to network address
+                
             all_client_ids.append(client_id_str)
             
             is_non_participating = fit_res.metrics.get("non_participating", False)
-            logger.info(f"Metrics: {fit_res.metrics} Client {client_proxy.cid}")
+            logger.info(f"Metrics: {fit_res.metrics} Client {client_id_str} (network: {client_proxy.cid})")
             
             if not is_non_participating:
                 participating_results.append((client_proxy, fit_res))
-                logger.info(f"Round {server_round}: Client {client_proxy.cid} - PARTICIPATING ({fit_res.metrics.get('attack_type', 'unknown')} attack)")
+                logger.info(f"Round {server_round}: Client {client_id_str} - PARTICIPATING ({fit_res.metrics.get('attack_type', 'unknown')} attack)")
             
             # Count all malicious clients, even if non-participating
             if fit_res.metrics.get("attack_type", "unknown") != "unknown":
@@ -119,10 +125,21 @@ class K8sFederatedStrategy(FedAvg):
             
             # Update detector with client behaviors for ALL clients
             for client_proxy, fit_res in results:
-                client_id = self._get_client_numeric_id(client_proxy.cid)
-                client_id_str = str(client_proxy.cid)
+                # CRITICAL: Use deterministic client_id from properties, not hashed network address
+                client_id_from_props = fit_res.metrics.get("client_id", None)
+                if client_id_from_props is not None:
+                    client_id = int(client_id_from_props)
+                else:
+                    # Fallback to network address hash (less reliable)
+                    client_id = self._get_client_numeric_id(client_proxy.cid)
+                    logger.warning(f"Client didn't send client_id in properties, using hash: {client_id}")
+                
+                # Use same deterministic client_id for ground truth comparison
+                client_id_str = str(client_id)
                 
                 current_round_params = parameters_to_ndarrays(fit_res.parameters)
+                
+                # Get the global model from the previous round
                 prev_round_model = self.get_previous_round_model(server_round)
                 
                 if prev_round_model is not None:
@@ -137,7 +154,7 @@ class K8sFederatedStrategy(FedAvg):
                     )
                     
                     is_actually_malicious = client_id_str in malicious_ground_truth
-                    logger.info(f"Result is {result} is actually malicious {is_actually_malicious}")
+                    logger.info(f"Client {client_id_str}: Result={result}, Actually malicious={is_actually_malicious}")
                     
                     if not(is_actually_malicious) and (result == 1):
                         logger.info(f"[+] DEBUG LINE: {client_id} round no: {server_round} is misclassified as malicious")

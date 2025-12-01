@@ -236,9 +236,23 @@ class MaliciousClientDetector:
             # Only keep features expected by the scaler
             feature_dict = {k: raw_features[k] for k in self.feature_scaler.feature_names_in_ if k in raw_features}
             feature_df = pd.DataFrame([feature_dict])
+            
+            # DEBUG: Log raw feature values
+            logger.debug(f"🔍 RAW features (before scaling):")
+            for key in ['param_mean', 'param_std', 'param_min', 'param_max', 'cosine_similarity']:
+                if key in feature_dict:
+                    logger.debug(f"  {key}: {feature_dict[key]}")
+            
             numerical_cols = feature_df.select_dtypes(include=['float64', 'int64', 'float32']).columns
             feature_df[numerical_cols] = self.feature_scaler.transform(feature_df[numerical_cols])
             scaled_features = feature_df.iloc[0].to_dict()
+            
+            # DEBUG: Log scaled feature values
+            logger.debug(f"🔍 SCALED features (after scaling):")
+            for key in ['param_mean', 'param_std', 'param_min', 'param_max', 'cosine_similarity']:
+                if key in scaled_features:
+                    logger.debug(f"  {key}: {scaled_features[key]}")
+            
             return scaled_features
         except Exception as e:
             logger.error(f"Failed to scale features: {e}")
@@ -256,6 +270,8 @@ class MaliciousClientDetector:
             prev_param_dict = None
             
         raw_features = self.extract_client_features(client_id, round_num, curr_param_dict, prev_param_dict)
+        logger.info(f"Client {client_id} Round {round_num} raw features:")
+        logger.info(f"  {raw_features}")
         if not raw_features:
             logger.warning(f"Features are empty, can't predict the output")
             return 0.0
@@ -272,7 +288,8 @@ class MaliciousClientDetector:
         behavior_description = self.create_behavior_description(scaled_features)
         
         # DEBUG: Print the scaled text being sent to model
-        # logger.info(f"Client {client_id} SCALED behavior text: {behavior_description[:200]}...")
+        logger.info(f"Client {client_id} Round {round_num} behavior text:")
+        logger.info(f"  {behavior_description}")
         
         self.client_behaviors[client_id].append(behavior_description)
         
