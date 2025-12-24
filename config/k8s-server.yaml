@@ -23,9 +23,13 @@ config_fit:
   local_epochs: 5
 
 detector:
-  enabled: true  
+  enabled: true
+  type: "num_distilbert"
+  model_path: "/app/detector_model/num_distilbert_best.pt"
+  scaler_path: "/app/detector_model/num_distilbert_scaler.pkl"
+  threshold: 0.5
   save_dir: "/app/detector_output"
   model:
     model_path: "/app/detector_model/finetuned_model_5gnidd_variant_merged_training"  
-  min_rounds_before_detection: 2  
+  min_rounds_before_detection: 3  
   use_simple_model_if_no_pretrained: false

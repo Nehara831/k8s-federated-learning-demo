@@ -35,6 +35,15 @@ spec:
         - name: dataset-cache
           mountPath: /shared-data
           readOnly: true
+        - name: sim-params
+          mountPath: /app/initial_params/simulation_initial_params.pkl
+          subPath: initial_params.pkl
+          readOnly: true
+        - name: global-models-output
+          mountPath: /app/outputs/global_models
+        - name: detector-models
+          mountPath: /app/detector_model
+          readOnly: true
         resources:
           requests:
             memory: "2Gi"
@@ -52,3 +61,14 @@ spec:
       - name: dataset-cache
         persistentVolumeClaim:
           claimName: dataset-cache-pvc
+      - name: sim-params
+        configMap:
+          name: simulation-initial-params
+      - name: global-models-output
+        hostPath:
+          path: /host/global_models
+          type: DirectoryOrCreate
+      - name: detector-models
+        hostPath:
+          path: /host/detector_model
+          type: Directory

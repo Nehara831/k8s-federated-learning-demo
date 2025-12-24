@@ -1,13 +1,14 @@
-import torch
-import torch.nn as nn
 import numpy as np
-import random
+import torch
 import logging
-import pickle
+import random
 from pathlib import Path
-from typing import List, Dict
-from client import FlowerClient
-from poisoned_fl_attacker import PoisonedFLAttacker
+from typing import Dict, Any, Optional, Tuple, List
+from collections import OrderedDict
+import copy
+
+from .client import FlowerClient  # ✅ FIX: Change from 'from client import' to 'from .client import'
+from .poisoned_fl_attacker import PoisonedFLAttacker
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +175,13 @@ class MaliciousClient(FlowerClient):
 
     def _train_normal(self, optimizer, criterion):
         """Standard training procedure"""
-        for batch_idx, (data, target) in enumerate(self.trainloader):
+        for batch_idx, batch in enumerate(self.trainloader):
+            # Handle both dict and tuple formats
+            if isinstance(batch, dict):
+                data, target = batch["features"], batch["label"]
+            else:
+                data, target = batch
+            
             features = data.to(self.device)
             labels = target.to(self.device)
             
@@ -197,7 +204,13 @@ class MaliciousClient(FlowerClient):
         flipped_count = 0
         total_samples = 0
         
-        for batch_idx, (data, target) in enumerate(self.trainloader):
+        for batch_idx, batch in enumerate(self.trainloader):
+            # Handle both dict and tuple formats
+            if isinstance(batch, dict):
+                data, target = batch["features"], batch["label"]
+            else:
+                data, target = batch
+            
             features = data.to(self.device)
             labels = target.to(self.device)
             total_samples += len(labels)
@@ -239,7 +252,13 @@ class MaliciousClient(FlowerClient):
         triggered_count = 0
         total_samples = 0
         
-        for batch_idx, (data, target) in enumerate(self.trainloader):
+        for batch_idx, batch in enumerate(self.trainloader):
+            # Handle both dict and tuple formats
+            if isinstance(batch, dict):
+                data, target = batch["features"], batch["label"]
+            else:
+                data, target = batch
+            
             features = data.to(self.device)
             labels = target.to(self.device)
             total_samples += len(labels)

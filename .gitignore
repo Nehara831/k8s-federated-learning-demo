@@ -59,3 +59,6 @@ models/
 logs/
 
 minikube-linux-amd64
+
+detector_model/
+comparison_data/

@@ -13,7 +13,7 @@ num_classes: 9
 batch_size: 8
 
 attack:
-  enabled: false
+  enabled: true
   attack_type: "model_poisoning"  # Options: model_poisoning, poisoned_fl, label_flip, backdoor
   malicious_ratio: 0.4  
   attack_params:
@@ -31,10 +31,10 @@ attack:
     gaussian_std: 1.0
     
     scale:
-      scale_factor: 1.5
+      scale_factor: 1.4
     
     constant_noise:
-      constant_noise_value: 1.1
+      constant_noise_value: 1.8
     
     label_flip:
       flip_strategy: "targeted"  # Options: targeted, random, class_confusion

@@ -19,11 +19,12 @@ logger = logging.getLogger(__name__)
 
 
 class MaliciousClientDetector:
-    def __init__(self, save_dir, num_clients, model_config=None, reference_model=None):
+    def __init__(self, save_dir, num_clients, model_config=None, reference_model=None, min_rounds_before_detection=2):
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(parents=True, exist_ok=True)
         self.num_clients = num_clients
         self.model_config = model_config
+        self.min_rounds_before_detection = min_rounds_before_detection  # ← ADD THIS
         
         # Storage for client behaviors
         self.client_behaviors = defaultdict(list)
@@ -52,6 +53,7 @@ class MaliciousClientDetector:
         self.load_distilbert_model()
         
         logger.info(f"Initialized detector for {num_clients} clients")
+        logger.info(f"Detection will start from round {min_rounds_before_detection}")  # ← ADD THIS
         if self.layer_names:
             logger.info(f"Extracted {len(self.layer_names)} layer names")
 
@@ -261,6 +263,11 @@ class MaliciousClientDetector:
     def update_client_behavior(self, client_id, round_num, current_round_params, prev_round_params):
         """Update client behavior tracking with PROPER SCALING"""
         
+        # ✅ ADD: Skip detection if before min_rounds_before_detection
+        if round_num < self.min_rounds_before_detection:
+            logger.info(f"Round {round_num} < {self.min_rounds_before_detection} - skipping detection for client {client_id}")
+            return 0  # Return benign (0)
+        
         # Extract RAW features first
         curr_param_dict = self._convert_params_to_dict(current_round_params)
         prev_param_dict = self._convert_params_to_dict(prev_round_params)
@@ -271,7 +278,7 @@ class MaliciousClientDetector:
             
         raw_features = self.extract_client_features(client_id, round_num, curr_param_dict, prev_param_dict)
         logger.info(f"Client {client_id} Round {round_num} raw features:")
-        logger.info(f"  {raw_features}")
+        # logger.info(f"  {raw_features}")
         if not raw_features:
             logger.warning(f"Features are empty, can't predict the output")
             return 0.0

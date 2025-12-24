@@ -46,6 +46,8 @@ spec:
         - name: client-config
           mountPath: /app/config
         - name: shared-storage
+          mountPath: /app/outputs/shared
+        - name: client-params-output
           mountPath: /app/outputs
         resources:
           requests:
@@ -64,3 +66,7 @@ spec:
       - name: shared-data
         persistentVolumeClaim:
           claimName: dataset-cache-pvc
+      - name: client-params-output
+        hostPath:
+          path: /host/client_params
+          type: DirectoryOrCreate

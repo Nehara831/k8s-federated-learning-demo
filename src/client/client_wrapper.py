@@ -25,8 +25,10 @@ from flwr.common import (
 # Add the modules directory to Python path
 sys.path.append('/app/modules')
 
-from client import FlowerClient
-from malicious_client import MaliciousClient
+from modules.client import FlowerClient  # ✅ FIX: Change from 'client' to 'modules.client'
+from modules.malicious_client import (
+    MaliciousClient
+)
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +173,10 @@ def create_client(client_id: int, config):
     # Determine if this client should be malicious
     is_malicious = should_be_malicious(client_id, config)
     
-    save_dir = Path(f"/app/outputs/client_{client_id}")
+    # ✅ FIX: Use environment variable for output directory
+    base_output_dir = os.environ.get('CLIENT_OUTPUT_DIR', '/app/outputs')
+    save_dir = Path(base_output_dir) / f"client_{client_id}"
+    logger.info(f"Using output directory: {save_dir}")
     save_dir.mkdir(parents=True, exist_ok=True)
     
     if is_malicious and config.attack.enabled:
@@ -197,6 +202,8 @@ def create_client(client_id: int, config):
             dataset_type=config.dataset.type,
             is_malicious=False
         )
+    
+    logger.info(f"Client {client_id} initialized with {len(trainloader.dataset)} training samples")
     
     return client
 

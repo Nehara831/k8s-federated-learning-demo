@@ -73,7 +73,13 @@ class FlowerClient(fl.client.NumPyClient):
             epoch_loss = 0.0
             epoch_batches = 0
             
-            for batch_idx, (data, target) in enumerate(self.trainloader):
+            for batch_idx, batch in enumerate(self.trainloader):
+                # Handle both dict and tuple formats
+                if isinstance(batch, dict):
+                    data, target = batch["features"], batch["label"]
+                else:
+                    data, target = batch
+                
                 data, target = data.to(self.device), target.to(self.device)
                 
                 optimizer.zero_grad()
@@ -100,7 +106,12 @@ class FlowerClient(fl.client.NumPyClient):
         val_total = 0
         
         with torch.no_grad():
-            for data, target in self.valloader:
+            for batch in self.valloader:
+                if isinstance(batch, dict):
+                    data, target = batch["features"], batch["label"]
+                else:
+                    data, target = batch
+                
                 data, target = data.to(self.device), target.to(self.device)
                 output = self.model(data)
                 loss = self.criterion(output, target)
@@ -120,9 +131,19 @@ class FlowerClient(fl.client.NumPyClient):
             "local_accuracy": float(local_accuracy),
             "local_loss": float(local_loss),
         }
-        
+
+        # --- Save model params for later analysis (filename includes client id + round no) ---
+        try:
+            # round_num should be provided in config (fallback to 0)
+            round_num = config.get("round_num", config.get("round", 0)) if isinstance(config, dict) else 0
+            saved_path = self._save_model_params(round_num, add_poison_suffix=getattr(self, "is_malicious", False))
+            logger.info(f"Client {self.client_id} saved model params to: {saved_path}")
+        except Exception as e:
+            logger.warning(f"Client {self.client_id} failed to save model params: {e}")
+        # ------------------------------------------------------------------------------
+
         logger.info(f"Client {self.client_id} - Returning updated parameters to server")
-        return self.get_parameters(config), len(self.trainloader.dataset), metrics
+        return self.get_parameters({}), len(self.trainloader.dataset), metrics
 
     def evaluate(self, parameters, config=None):  # ✅ Made optional with default
         """Evaluate the model on local validation data"""
@@ -141,7 +162,12 @@ class FlowerClient(fl.client.NumPyClient):
         total_samples = 0
         
         with torch.no_grad():
-            for data, target in self.valloader:
+            for batch in self.valloader:
+                if isinstance(batch, dict):
+                    data, target = batch["features"], batch["label"]
+                else:
+                    data, target = batch
+                
                 data, target = data.to(self.device), target.to(self.device)
                 output = self.model(data)
                 loss = self.criterion(output, target)
@@ -155,5 +181,26 @@ class FlowerClient(fl.client.NumPyClient):
         accuracy = correct / total_samples if total_samples > 0 else 0.0
         
         logger.info(f"Client {self.client_id} evaluation complete. Loss: {avg_loss:.6f}, Accuracy: {accuracy:.4f}")
-        
-        return avg_loss, total_samples, {"accuracy": accuracy}
+
+        return avg_loss, total_samples, {"accuracy": accuracy,"loss": avg_loss}
+
+    def _save_model_params(self, round_num: int, add_poison_suffix: bool = False) -> str:
+        """Save current model.state_dict() as a pickle of numpy arrays. Returns saved filepath."""
+        import pickle
+
+        try:
+            self.save_dir.mkdir(parents=True, exist_ok=True)
+            suffix = "_poisoned" if add_poison_suffix else ""
+            fname = f"client_{self.client_id}_round_{round_num}_params{suffix}.pkl"
+            path = self.save_dir / fname
+
+            # Convert tensors to numpy and save as a dict
+            params = {name: param.cpu().detach().numpy() for name, param in self.model.state_dict().items()}
+
+            with open(path, "wb") as f:
+                pickle.dump(params, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+            return str(path)
+        except Exception as e:
+            logger.warning(f"Client {self.client_id} failed to save model params (round={round_num}): {e}")
+            return ""

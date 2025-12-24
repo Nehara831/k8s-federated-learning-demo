@@ -14,6 +14,18 @@ from sklearn.feature_selection import SelectKBest, f_classif
 
 logger = logging.getLogger(__name__)
 
+class DictTensorDataset(torch.utils.data.Dataset):
+    """TensorDataset that returns dicts instead of tuples (matches simulation)"""
+    def __init__(self, X, y):
+        self.features = X
+        self.targets = y
+    
+    def __getitem__(self, index):
+        return {"features": self.features[index], "label": self.targets[index]}
+    
+    def __len__(self):
+        return len(self.features)
+
 def download_5gnidd_dataset(data_path):
     """Download 5G-NIDD dataset from Kaggle"""
     local_data_dir = os.path.join(data_path, "5gnidd")
@@ -149,7 +161,7 @@ def get_client_dataset(client_id: int, config):
         )
         X_train_tensor = torch.FloatTensor(X_train)
         y_train_tensor = torch.LongTensor(y_train)
-        trainset = torch.utils.data.TensorDataset(X_train_tensor, y_train_tensor)
+        trainset = DictTensorDataset(X_train_tensor, y_train_tensor)
     
     elif config.dataset.type == "5gnidd":
         logger.info("Loading 5G-NIDD dataset...")
@@ -190,16 +202,23 @@ def get_client_dataset(client_id: int, config):
             if X is None:
                 raise ValueError("Failed to preprocess 5G-NIDD dataset")
         
-        # Split into train/test
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=config.dataset.get('test_size', 0.2), 
-            random_state=config.dataset.get('seed', 42)
-        )
+        # ✅ KEY CHANGE: Use PyTorch random_split instead of sklearn (matches simulation)
+        # Create full dataset first
+        X_tensor = torch.FloatTensor(X)
+        y_tensor = torch.LongTensor(y)
+        full_dataset = DictTensorDataset(X_tensor, y_tensor)
         
-        # Convert to tensors
-        X_train_tensor = torch.FloatTensor(X_train)
-        y_train_tensor = torch.LongTensor(y_train)
-        trainset = torch.utils.data.TensorDataset(X_train_tensor, y_train_tensor)
+        # Split using PyTorch (matches simulation exactly)
+        test_size = config.dataset.get('test_size', 0.2)
+        seed = config.dataset.get('seed', 42)
+        test_len = int(len(full_dataset) * test_size)
+        train_len = len(full_dataset) - test_len
+        
+        trainset, testset = torch.utils.data.random_split(
+            full_dataset,
+            [train_len, test_len],
+            generator=torch.Generator().manual_seed(seed)
+        )
         
         logger.info(f"5G-NIDD dataset loaded: {len(trainset)} training samples")
     
@@ -207,12 +226,11 @@ def get_client_dataset(client_id: int, config):
         raise ValueError(f"Unsupported dataset: {config.dataset.type}")
     
     # Partition dataset for this client using IID (random_split with fixed seed)
-    # This matches the simulation's approach for fair comparison
     num_clients = config.num_clients
     partition_size = len(trainset) // num_clients
     remainder = len(trainset) % num_clients
     
-    # Create partition lengths (last client gets extra samples)
+    # Create partition lengths
     partition_lengths = [partition_size] * num_clients
     partition_lengths[-1] += remainder
     
@@ -226,33 +244,109 @@ def get_client_dataset(client_id: int, config):
         generator=torch.Generator().manual_seed(123)
     )
     
-    # With StatefulSet, client_id is already 0, 1, 2, ... (no modulo needed)
-    # But add modulo as safety for Deployment fallback
-    effective_client_id = client_id % num_clients
-    
     # Get this client's partition
+    effective_client_id = client_id % num_clients
     client_trainset = all_partitions[effective_client_id]
     
     logger.info(f"Client {client_id} (effective: {effective_client_id}) dataset size: {len(client_trainset)}")
     
+    # ✅ ADD: Analyze class distribution for this client
+    _log_client_data_distribution(client_id, client_trainset, config.dataset.type)
+    
     if len(client_trainset) == 0:
         raise ValueError(f"Client {client_id} has empty dataset! Check partitioning logic.")
     
-    # Create validation set (20% of client's data)
-    val_size = int(0.2 * len(client_trainset))
-    train_size = len(client_trainset) - val_size
+    # ✅ MATCH SIMULATION: Create validation set (10% of client's data)
+    num_total = len(client_trainset)
+    val_ratio = 0.1
+    num_val = max(1, int(val_ratio * num_total))
+    num_train = num_total - num_val
+    
+    if num_train == 0:
+        num_train = 1
+        num_val = num_total - 1
+    
     client_trainset, client_valset = torch.utils.data.random_split(
-        client_trainset, [train_size, val_size]
+        client_trainset, [num_train, num_val],
+        generator=torch.Generator().manual_seed(123)
     )
     
+    # ✅ MATCH SIMULATION: Use drop_last=True
     trainloader = torch.utils.data.DataLoader(
-        client_trainset, batch_size=config.batch_size, shuffle=True
+        client_trainset, 
+        batch_size=min(config.batch_size, num_train), 
+        shuffle=True,
+        drop_last=True
     )
     valloader = torch.utils.data.DataLoader(
-        client_valset, batch_size=config.batch_size
+        client_valset, 
+        batch_size=min(config.batch_size, num_val),
+        shuffle=True,
+        drop_last=True
     )
     
     return trainloader, valloader
+
+
+def _log_client_data_distribution(client_id: int, dataset, dataset_type: str):
+    """
+    Log the class distribution for a client's dataset
+    
+    Args:
+        client_id: Client identifier
+        dataset: The dataset partition
+        dataset_type: Type of dataset (mnist, iris, 5gnidd)
+    """
+    try:
+        # Extract all labels from the dataset
+        labels = []
+        
+        for i in range(len(dataset)):
+            sample = dataset[i]
+            
+            # Handle different dataset formats
+            if isinstance(sample, dict):
+                # DictTensorDataset format
+                label = sample['label'].item() if torch.is_tensor(sample['label']) else sample['label']
+            elif isinstance(sample, (tuple, list)) and len(sample) >= 2:
+                # TensorDataset format (features, label)
+                label = sample[1].item() if torch.is_tensor(sample[1]) else sample[1]
+            else:
+                logger.warning(f"Unknown sample format: {type(sample)}")
+                continue
+            
+            labels.append(label)
+        
+        # Count class distribution
+        if len(labels) > 0:
+            labels_array = np.array(labels)
+            unique_classes, counts = np.unique(labels_array, return_counts=True)
+            
+            # Create distribution dictionary
+            distribution = {int(cls): int(count) for cls, count in zip(unique_classes, counts)}
+            
+            # Log detailed distribution
+            logger.info(f"📊 Client {client_id} Data Distribution:")
+            logger.info(f"   Total samples: {len(labels)}")
+            logger.info(f"   Number of classes: {len(unique_classes)}")
+            logger.info(f"   Class distribution: {distribution}")
+            
+            # Calculate and log percentages
+            percentages = {cls: (count/len(labels))*100 for cls, count in distribution.items()}
+            logger.info(f"   Class percentages: {{{', '.join([f'{cls}: {pct:.1f}%' for cls, pct in percentages.items()])}}}")
+            
+            # Check for class imbalance
+            if len(counts) > 1:
+                imbalance_ratio = max(counts) / min(counts)
+                if imbalance_ratio > 2.0:
+                    logger.warning(f"   ⚠️  Class imbalance detected! Ratio: {imbalance_ratio:.2f}:1")
+        else:
+            logger.warning(f"Client {client_id}: No labels extracted from dataset")
+            
+    except Exception as e:
+        logger.error(f"Failed to analyze data distribution for client {client_id}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 def prepare_server_dataset(config):
     """Prepare test dataset for server evaluation"""

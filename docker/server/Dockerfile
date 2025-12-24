@@ -21,6 +21,7 @@ COPY modules/ ./modules/
 RUN mkdir -p /app/data
 RUN mkdir -p /app/outputs
 RUN mkdir -p /app/detector_output
+RUN mkdir -p /app/initial_params
 
 # Copy detector model directly into the image
 COPY detector_model/ /app/detector_model/
