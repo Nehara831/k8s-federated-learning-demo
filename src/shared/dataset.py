@@ -153,6 +153,16 @@ def get_client_dataset(client_id: int, config):
         trainset = torchvision.datasets.MNIST(
             root='/app/data', train=True, download=True, transform=transform
         )
+    
+    elif config.dataset.type == "fashion_mnist":
+        # Fashion-MNIST: same transform as MNIST (28x28 grayscale)
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.2860,), (0.3530,))  # Fashion-MNIST mean/std
+        ])
+        trainset = torchvision.datasets.FashionMNIST(
+            root='/app/data', train=True, download=True, transform=transform
+        )
         
     elif config.dataset.type == "iris":
         iris = load_iris()
@@ -357,6 +367,16 @@ def prepare_server_dataset(config):
             transforms.Normalize((0.1307,), (0.3081,))
         ])
         testset = torchvision.datasets.MNIST(
+            root='./data', train=False, download=True, transform=transform
+        )
+    
+    elif config.dataset.type == "fashion_mnist":
+        # Fashion-MNIST test dataset
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.2860,), (0.3530,))  # Fashion-MNIST mean/std
+        ])
+        testset = torchvision.datasets.FashionMNIST(
             root='./data', train=False, download=True, transform=transform
         )
     

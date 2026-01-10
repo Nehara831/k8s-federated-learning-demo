@@ -87,6 +87,9 @@ def create_model_for_dataset(dataset_type: str, num_classes: int, input_size=Non
     """Create model based on dataset type - matches simulation exactly"""
     if dataset_type == "mnist":
         return MNISTNet(num_classes=num_classes)
+    elif dataset_type == "fashion_mnist":
+        # Fashion-MNIST uses same architecture as MNIST (28x28 grayscale)
+        return MNISTNet(num_classes=num_classes)
     elif dataset_type == "iris":
         return IrisNet(num_classes=num_classes)
     elif dataset_type == "tabular":

@@ -3,19 +3,19 @@ server:
   port: 8080
 
 dataset:
-  type: "5gnidd"
+  type: "fashion_mnist"
   test_size: 0.2
   seed: 42
   data_dir: "/app/data"
 
 num_clients: 10
-num_classes: 9
-batch_size: 8
+num_classes: 10
+batch_size: 32
 
 attack:
   enabled: true
-  attack_type: "poisoned_fl"  # Options: model_poisoning, poisoned_fl, label_flip, backdoor
-  malicious_ratio: 0.4  
+  attack_type: "model_poisoning"  # Options: model_poisoning, poisoned_fl, label_flip, backdoor
+  malicious_ratio: 0.4  # 4 out of 10 clients will be malicious
   attack_params:
     attack_start_round: 3
     attack_probability: 1.0
@@ -34,27 +34,21 @@ attack:
       scale_factor: 1.4
     
     constant_noise:
-      constant_noise_value: 1.8
+      constant_noise_value: 1.1
     
     label_flip:
       flip_strategy: "targeted"  # Options: targeted, random, class_confusion
       flip_ratio: 0.5
       target_label: 0
       source_label: null
-      num_classes: 9
+      num_classes: 10
     
-        
     poisoned_fl:
       sign_vector_seed: 42  # CRITICAL: Must be same for all malicious clients
       initial_lambda: 8.0
       lambda_increase_factor: 1.0
       lambda_decrease_factor: 0.7
       cosine_threshold: 0.5
-      malicious_ratio: 0.33
+      malicious_ratio: 0.4
       benign_warmup: 1
       minimum_lambda: 0.5
-
-config_fit:
-  lr: 0.01
-  momentum: 0.9
-  local_epochs: 5
