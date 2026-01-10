@@ -7,6 +7,13 @@ dataset:
   test_size: 0.2
   seed: 42
   data_dir: "/app/data"
+  num_classes: 9
+  
+  distribution:
+    type: "label_skew"  # Options: 'iid', 'non_iid', 'label_skew'
+    quantity_skew_ratio: 3.0
+    alpha: 0.1
+    partition_seed: 123
 
 num_clients: 10
 num_classes: 9
@@ -14,7 +21,7 @@ batch_size: 8
 
 attack:
   enabled: true
-  attack_type: "poisoned_fl"  # Options: model_poisoning, poisoned_fl, label_flip, backdoor
+  attack_type: "model_poisoning"  # Options: model_poisoning, poisoned_fl, label_flip, backdoor
   malicious_ratio: 0.4  
   attack_params:
     attack_start_round: 3
