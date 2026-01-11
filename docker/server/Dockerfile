@@ -13,9 +13,9 @@ COPY docker/server/requirements.txt .
 RUN pip install --no-cache-dir --timeout=1000 --retries=5 -r requirements.txt
 
 # Copy source code
-COPY src/ ./src/
-COPY config/ ./config/
-COPY modules/ ./modules/
+# COPY src/ ./src/
+# COPY config/ ./config/
+# COPY modules/ ./modules/
 
 # Create directories for data and outputs
 RUN mkdir -p /app/data

@@ -44,6 +44,12 @@ spec:
         - name: detector-models
           mountPath: /app/detector_model
           readOnly: true
+        - name: src
+          mountPath: /app/src
+        - name: config
+          mountPath: /app/config
+        - name: modules
+          mountPath: /app/modules
         resources:
           requests:
             memory: "2Gi"
@@ -51,6 +57,7 @@ spec:
           limits:
             memory: "3Gi"
             cpu: "2000m"
+        
       volumes:
       - name: server-config
         configMap:
@@ -71,4 +78,16 @@ spec:
       - name: detector-models
         hostPath:
           path: /host/detector_model
+          type: Directory
+      - name: src
+        hostPath:
+          path: /app/src
+          type: Directory
+      - name: config
+        hostPath:
+          path: /app/config
+          type: Directory
+      - name: modules
+        hostPath:
+          path: /app/modules
           type: Directory
