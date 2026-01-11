@@ -49,12 +49,7 @@ spec:
           mountPath: /app/outputs/shared
         - name: client-params-output
           mountPath: /app/outputs
-        - name: src
-          mountPath: /app/src
-        - name: config
-          mountPath: /app/config
-        - name: modules
-          mountPath: /app/modules
+        # Removed src, config, modules volume mounts - using baked-in code from Docker image
         resources:
           requests:
             memory: "1Gi"      # Reduced from 3Gi
@@ -76,17 +71,4 @@ spec:
         hostPath:
           path: /host/client_params
           type: DirectoryOrCreate
-      - name: src
-        hostPath:
-          path: /app/src
-          type: Directory
-
-      - name: config
-        hostPath:
-          path: /app/config
-          type: Directory
-
-      - name: modules
-        hostPath:
-          path: /app/modules
-          type: Directory
+      # Removed src, config, modules volume definitions - using baked-in code from Docker image

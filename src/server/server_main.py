@@ -20,8 +20,27 @@ from src.detector.num_distilbert_wrapper import NumDistilBERTWrapper  # New dete
 from modules.s3_exporter import S3MetricsExporter
 from modules.shap_calculator import SHAPCalculator
 
-logging.basicConfig(level=logging.INFO)
+# Configure logging AFTER all imports to prevent other modules from overriding it
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(levelname)s:%(name)s:%(message)s',
+    handlers=[
+        logging.StreamHandler()  # Explicitly add stream handler for stdout
+    ],
+    force=True  # Force reconfiguration even if already configured
+)
+
+# Set our logger to INFO level explicitly
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# Also set root logger to INFO
+logging.getLogger().setLevel(logging.INFO)
+
+# Force print to ensure we see output
+print("=" * 80, flush=True)
+print("🚀 SERVER STARTING - Logging initialized", flush=True)
+print("=" * 80, flush=True)
 
 def set_seed(seed=42):
     """Set all random seeds for reproducibility"""
@@ -143,9 +162,12 @@ def load_initial_params_from_simulation(params_file):
         return None
 
 def main():
+    print("🔥 MAIN() FUNCTION CALLED", flush=True)
+    print("📋 About to log with logger.info...", flush=True)
     logger.info("=" * 80)
     logger.info("🚀 STARTING FEDERATED LEARNING SERVER")
     logger.info("=" * 80)
+    print("✅ Logger.info called successfully", flush=True)
     
     # Load configuration
     config_path = os.getenv('CONFIG_PATH', '/app/config/k8s-server.yaml')
@@ -206,9 +228,16 @@ def main():
         logger.info("⚠️  Running without malicious client detection")
     
     # ✅ INITIALIZE S3 EXPORTER (if configured)
-    logger.info("=" * 80)
-    logger.info("📤 INITIALIZING S3 METRICS EXPORTER")
-    logger.info("=" * 80)
+    print("=" * 80, flush=True)
+    print("📤 INITIALIZING S3 METRICS EXPORTER", flush=True)
+    print("=" * 80, flush=True)
+    
+    # Debug: Check if s3_export config exists
+    print(f"🐛 DEBUG: hasattr(config, 's3_export') = {hasattr(config, 's3_export')}", flush=True)
+    if hasattr(config, 's3_export'):
+        print(f"🐛 DEBUG: config.s3_export = {config.s3_export}", flush=True)
+        print(f"🐛 DEBUG: config.s3_export.enabled = {config.s3_export.enabled}", flush=True)
+        print(f"🐛 DEBUG: type(config.s3_export.enabled) = {type(config.s3_export.enabled)}", flush=True)
     
     s3_exporter = None
     if hasattr(config, 's3_export') and config.s3_export.enabled:
@@ -220,14 +249,14 @@ def main():
             s3_region = config.s3_export.get('region') or os.getenv('AWS_DEFAULT_REGION', 'us-east-1')
             s3_prefix = config.s3_export.get('prefix', 'sessions/')
             
-            logger.info(f"🌐 Configuring S3 exporter:")
-            logger.info(f"   Bucket: {s3_bucket}")
-            logger.info(f"   Region: {s3_region}")
-            logger.info(f"   Prefix: {s3_prefix}")
+            print(f"🌐 Configuring S3 exporter:", flush=True)
+            print(f"   Bucket: {s3_bucket}", flush=True)
+            print(f"   Region: {s3_region}", flush=True)
+            print(f"   Prefix: {s3_prefix}", flush=True)
             if s3_access_key:
-                logger.info(f"   Credentials: ✓ Loaded from .env (AWS_ACCESS_KEY_ID={s3_access_key[:10]}...)")
+                print(f"   Credentials: ✓ Loaded from env (AWS_ACCESS_KEY_ID={s3_access_key[:10]}...)", flush=True)
             else:
-                logger.warning(f"   Credentials: ⚠️  Not found in .env (AWS_ACCESS_KEY_ID)")
+                print(f"   Credentials: ⚠️  Not found in env (AWS_ACCESS_KEY_ID)", flush=True)
             
             s3_exporter = S3MetricsExporter(
                 bucket=s3_bucket,
@@ -240,22 +269,22 @@ def main():
             )
             
             if s3_exporter.is_connected:
-                logger.info(f"✅ S3 exporter initialized successfully")
-                logger.info(f"   Session: {s3_exporter.session_id}")
-                logger.info(f"   Path: {s3_exporter.get_session_path()}")
+                print(f"✅ S3 exporter initialized successfully", flush=True)
+                print(f"   Session: {s3_exporter.session_id}", flush=True)
+                print(f"   Path: {s3_exporter.get_session_path()}", flush=True)
             else:
-                logger.warning(f"⚠️  S3 exporter failed to connect - metrics will only be saved locally")
+                print(f"⚠️  S3 exporter failed to connect - metrics will only be saved locally", flush=True)
                 
         except Exception as e:
-            logger.error(f"❌ Failed to initialize S3 exporter: {e}")
-            logger.warning(f"   Continuing without S3 export - metrics will only be saved locally")
+            print(f"❌ Failed to initialize S3 exporter: {e}", flush=True)
+            print(f"   Continuing without S3 export - metrics will only be saved locally", flush=True)
             import traceback
-            logger.error(traceback.format_exc())
+            print(traceback.format_exc(), flush=True)
     else:
-        logger.info("ℹ️  S3 export is DISABLED in config")
-        logger.info("   Metrics will be saved locally only")
+        print("ℹ️  S3 export is DISABLED in config", flush=True)
+        print("   Metrics will be saved locally only", flush=True)
     
-    logger.info("=" * 80)
+    print("=" * 80, flush=True)
     
     # ✅ INITIALIZE SHAP CALCULATOR (optional, for model explainability)
     logger.info("=" * 80)

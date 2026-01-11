@@ -15,7 +15,7 @@ sleep 5 && echo "✓ Directories mounted into Minikube VM"
 kubectl get pods -n federated-learning
 
 # 3. Scale down everything (clean slate)
-kubectl scale deployment fl-server --replicas=0 -n federated-learning && \
+kubectl scale deployment fl-server --replicas=1 -n federated-learning && \
 kubectl scale statefulset fl-clients --replicas=10 -n federated-learning && \
 echo "✓ Scaled down" && kubectl get pods -n federated-learning
 
@@ -46,7 +46,7 @@ kubectl get pods -n federated-learning
 kubectl logs -f deployment/fl-server -n federated-learning
 
 # 8. Monitor specific client
-kubectl logs -f fl-clients-0 -n federated-learning
+kubectl logs -f fl-clients-8 -n federated-learning
 
 # ============================================
 # QUICK RESTART (without rebuild)
@@ -122,3 +122,16 @@ minikube stop
 
 
 kubectl logs -f deployment/fl-server -n federated-learning 2>&1 | tee server_logs_$(date +%Y%m%d_%H%M%S).log
+
+# Replace with your actual AWS credentials
+kubectl create secret generic aws-credentials \
+  --from-literal=AWS_ACCESS_KEY_ID='AKIAQ3EGVAVZZ62KBLH5' \
+  --from-literal=AWS_SECRET_ACCESS_KEY='ubsFm6oGefN+fKASKbFeq6va61x4IP7d0/aA7prt' \
+  --from-literal=AWS_DEFAULT_REGION='us-east-1' \
+  -n federated-learning
+
+# Verify it was created
+kubectl get secret aws-credentials -n federated-learning
+
+# Restart the server to pick up credentials
+kubectl rollout restart deployment/fl-server 
