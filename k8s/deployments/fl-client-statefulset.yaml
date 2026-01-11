@@ -49,6 +49,7 @@ spec:
           mountPath: /app/outputs/shared
         - name: client-params-output
           mountPath: /app/outputs
+        # Removed src, config, modules volume mounts - using baked-in code from Docker image
         resources:
           requests:
             memory: "1Gi"      # Reduced from 3Gi
@@ -70,3 +71,4 @@ spec:
         hostPath:
           path: /host/client_params
           type: DirectoryOrCreate
+      # Removed src, config, modules volume definitions - using baked-in code from Docker image
