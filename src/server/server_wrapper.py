@@ -8,6 +8,10 @@ from flwr.common import Parameters, FitRes, parameters_to_ndarrays, ndarrays_to_
 from flwr.server.client_proxy import ClientProxy
 import pickle
 from pathlib import Path
+from modules.s3_exporter import S3MetricsExporter
+from modules.shap_calculator import SHAPCalculator
+import time
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +26,8 @@ class K8sFederatedStrategy(FedAvg):
         config,
         testloader=None,
         malicious_detector=None,
+        s3_exporter=None,
+        shap_calculator=None,
         fraction_fit: float = 1.0,
         fraction_evaluate: float = 1.0,
         min_fit_clients: int = 2,
@@ -37,7 +43,14 @@ class K8sFederatedStrategy(FedAvg):
         self.config = config
         self.testloader = testloader
         self.malicious_detector = malicious_detector
+        self.s3_exporter = s3_exporter
+        self.shap_calculator = shap_calculator
         self._saved_initial_parameters = initial_parameters
+        
+        # Track round metrics for S3 export
+        self.round_start_time = None
+        self.round_metrics = {}
+        self.client_performance_history = {}
         
         # Initialize parent strategy
         super().__init__(
@@ -77,6 +90,9 @@ class K8sFederatedStrategy(FedAvg):
         This method is detector-agnostic - works with any detector implementation.
         """
         
+        # Start timing the round
+        self.round_start_time = time.time()
+        
         total_responses = len(results)
         logger.info(f"Round {server_round}: Received {total_responses} client responses")
         
@@ -84,6 +100,7 @@ class K8sFederatedStrategy(FedAvg):
         participating_results = []
         malicious_ground_truth = []
         all_client_ids = []
+        round_client_metrics = {}
         
         for client_proxy, fit_res in results:
             # Get deterministic client_id from metrics (not network address)
@@ -94,6 +111,13 @@ class K8sFederatedStrategy(FedAvg):
                 client_id_str = str(client_proxy.cid)
             
             all_client_ids.append(client_id_str)
+            
+            # Store client metrics for S3 export
+            round_client_metrics[client_id_str] = {
+                "local_accuracy": fit_res.metrics.get("local_accuracy", 0),
+                "local_loss": fit_res.metrics.get("local_loss", 0),
+                "attack_type": fit_res.metrics.get("attack_type", "unknown"),
+            }
             
             is_non_participating = fit_res.metrics.get("non_participating", False)
             logger.info(f"Metrics: {fit_res.metrics} Client {client_id_str} (network: {client_proxy.cid})")
@@ -110,6 +134,9 @@ class K8sFederatedStrategy(FedAvg):
         total_client_count = len(all_client_ids)
         
         # ✅ MALICIOUS DETECTION (works with ANY detector)
+        suspicious_clients = set()
+        perf_results = None
+        
         if self.malicious_detector and server_round > 1:
             self.malicious_detector.start_new_round(server_round)
             
@@ -204,6 +231,18 @@ class K8sFederatedStrategy(FedAvg):
         metrics["total_client_responses"] = total_responses
         metrics["participating_clients"] = len(participating_results)
         metrics["participation_rate"] = len(participating_results) / total_responses if total_responses > 0 else 0
+        
+        # Export round metrics to S3
+        self._export_round_metrics_to_s3(
+            server_round, 
+            participating_results, 
+            malicious_ground_truth, 
+            suspicious_clients, 
+            perf_results, 
+            total_client_count,
+            round_client_metrics,
+            metrics
+        )
         
         return aggregated_params, metrics
     
@@ -381,9 +420,124 @@ class K8sFederatedStrategy(FedAvg):
         except Exception as e:
             logger.error(f"Failed to save global model round {round_num}: {e}")
             return ""
+    
+    def _export_round_metrics_to_s3(
+        self,
+        server_round: int,
+        participating_results: List,
+        malicious_ground_truth: List,
+        suspicious_clients: set,
+        perf_results: Optional[Dict],
+        total_client_count: int,
+        round_client_metrics: Dict,
+        aggregated_metrics: Dict
+    ):
+        """
+        Export comprehensive round metrics to S3.
+        Uploads round data JSON and collects SHAP data for later aggregated CSV upload.
+        """
+        if not self.s3_exporter:
+            logger.debug("S3 exporter not initialized, skipping metrics export")
+            return
+        
+        try:
+            # Build comprehensive round data
+            round_data = {
+                "round_num": server_round,
+                "timestamp": time.time(),
+                "total_clients": total_client_count,
+                "participating_clients": len(participating_results),
+                "participation_rate": len(participating_results) / total_client_count if total_client_count > 0 else 0,
+                "malicious_clients": malicious_ground_truth,
+                "suspicious_clients": list(suspicious_clients),
+                "client_metrics": round_client_metrics,
+                "aggregated_metrics": aggregated_metrics,
+                "detector_metrics": perf_results if perf_results else {},
+            }
+            
+            # Calculate SHAP values if calculator is available
+            if self.shap_calculator and self.shap_calculator.available:
+                logger.info(f"📊 Calculating SHAP values for round {server_round}...")
+                shap_data_list = []
+                
+                try:
+                    # Load global model for SHAP explanation
+                    global_model = create_model_for_dataset(
+                        dataset_type=self.config.dataset.type,
+                        num_classes=self.config.num_classes,
+                        input_size=20 if self.config.dataset.type == "5gnidd" else None
+                    )
+                    global_model.eval()
+                    
+                    # Get test samples for SHAP background
+                    if self.testloader:
+                        test_batch = next(iter(self.testloader))
+                        background_features = test_batch["features"].numpy()
+                        self.shap_calculator.set_background_data(background_features)
+                    
+                    # Calculate SHAP for client predictions
+                    for client_id, metrics in round_client_metrics.items():
+                        try:
+                            # Generate synthetic features based on client metrics for SHAP
+                            # (In practice, you would use actual client local data or aggregated updates)
+                            features = np.array([[
+                                metrics.get("local_accuracy", 0.0),
+                                metrics.get("local_loss", 0.0),
+                            ]])
+                            
+                            # Calculate SHAP values
+                            shap_values = self.shap_calculator.calculate_shap_values(
+                                global_model,
+                                features,
+                                data_type=self.config.dataset.type
+                            )
+                            
+                            if shap_values:
+                                # Get ground truth label
+                                ground_truth_label = "malicious" if client_id in [str(c) for c in malicious_ground_truth] else "benign"
+                                predicted_label = "malicious" if client_id in [str(c) for c in suspicious_clients] else "benign"
+                                
+                                # Add to SHAP CSV data
+                                self.s3_exporter.add_shap_row_data(
+                                    client_id=int(client_id),
+                                    round_num=server_round,
+                                    features={
+                                        "accuracy": metrics.get("local_accuracy", 0.0),
+                                        "loss": metrics.get("local_loss", 0.0),
+                                    },
+                                    shap_values=shap_values,
+                                    main_task_accuracy=metrics.get("local_accuracy", 0.0),
+                                    main_task_loss=metrics.get("local_loss", 0.0),
+                                    predicted_label=predicted_label,
+                                    ground_truth_label=ground_truth_label,
+                                )
+                                shap_data_list.append(client_id)
+                        
+                        except Exception as e:
+                            logger.warning(f"Error calculating SHAP for client {client_id}: {e}")
+                            continue
+                    
+                    logger.info(f"✅ SHAP calculations completed for {len(shap_data_list)} clients")
+                    round_data["shap_clients"] = shap_data_list
+                    
+                except Exception as e:
+                    logger.warning(f"Could not calculate SHAP values: {e}")
+            else:
+                logger.debug("SHAP calculator not available, skipping SHAP calculations")
+            
+            # Upload round data JSON
+            success = self.s3_exporter.upload_round_data(round_data, server_round)
+            
+            if success:
+                logger.info(f"✅ Round {server_round} metrics exported to S3")
+            else:
+                logger.warning(f"⚠️  Failed to export round {server_round} metrics to S3")
+                
+        except Exception as e:
+            logger.error(f"Error exporting round {server_round} metrics to S3: {e}")
 
 
-def create_strategy(config, initial_parameters, testloader=None, malicious_detector=None):
+def create_strategy(config, initial_parameters, testloader=None, malicious_detector=None, s3_exporter=None, shap_calculator=None):
     """
     Create federated learning strategy.
     Works with ANY detector through common interface.
@@ -428,6 +582,8 @@ def create_strategy(config, initial_parameters, testloader=None, malicious_detec
         config=config,
         testloader=testloader,
         malicious_detector=malicious_detector,
+        s3_exporter=s3_exporter,
+        shap_calculator=shap_calculator,
         fraction_fit=config.server.fraction_fit,
         fraction_evaluate=config.server.fraction_evaluate,
         min_fit_clients=config.server.min_fit_clients,

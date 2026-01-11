@@ -2,17 +2,23 @@ import os
 import logging
 from pathlib import Path
 from omegaconf import OmegaConf
+from dotenv import load_dotenv
 import flwr as fl
 import pickle
 import numpy as np
 import random
 import torch
 
+# Load environment variables from .env file
+load_dotenv()
+
 from src.shared.dataset import prepare_server_dataset
 from src.shared.models import create_model_for_dataset
 from src.server.server_wrapper import create_strategy
 from src.detector.malicious_detector import MaliciousClientDetector  # Existing detector
 from src.detector.num_distilbert_wrapper import NumDistilBERTWrapper  # New detector
+from modules.s3_exporter import S3MetricsExporter
+from modules.shap_calculator import SHAPCalculator
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -199,6 +205,75 @@ def main():
     else:
         logger.info("⚠️  Running without malicious client detection")
     
+    # ✅ INITIALIZE S3 EXPORTER (if configured)
+    logger.info("=" * 80)
+    logger.info("📤 INITIALIZING S3 METRICS EXPORTER")
+    logger.info("=" * 80)
+    
+    s3_exporter = None
+    if hasattr(config, 's3_export') and config.s3_export.enabled:
+        try:
+            s3_bucket = config.s3_export.bucket
+            # Load AWS credentials from environment variables (.env file)
+            s3_access_key = os.getenv('AWS_ACCESS_KEY_ID')
+            s3_secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
+            s3_region = config.s3_export.get('region') or os.getenv('AWS_DEFAULT_REGION', 'us-east-1')
+            s3_prefix = config.s3_export.get('prefix', 'sessions/')
+            
+            logger.info(f"🌐 Configuring S3 exporter:")
+            logger.info(f"   Bucket: {s3_bucket}")
+            logger.info(f"   Region: {s3_region}")
+            logger.info(f"   Prefix: {s3_prefix}")
+            if s3_access_key:
+                logger.info(f"   Credentials: ✓ Loaded from .env (AWS_ACCESS_KEY_ID={s3_access_key[:10]}...)")
+            else:
+                logger.warning(f"   Credentials: ⚠️  Not found in .env (AWS_ACCESS_KEY_ID)")
+            
+            s3_exporter = S3MetricsExporter(
+                bucket=s3_bucket,
+                region=s3_region,
+                compress=config.s3_export.get('compress', True),
+                s3_prefix=s3_prefix,
+                local_export_dir=config.s3_export.get('local_export_dir', 'temp-data'),
+                access_key_id=s3_access_key,
+                secret_access_key=s3_secret_key
+            )
+            
+            if s3_exporter.is_connected:
+                logger.info(f"✅ S3 exporter initialized successfully")
+                logger.info(f"   Session: {s3_exporter.session_id}")
+                logger.info(f"   Path: {s3_exporter.get_session_path()}")
+            else:
+                logger.warning(f"⚠️  S3 exporter failed to connect - metrics will only be saved locally")
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize S3 exporter: {e}")
+            logger.warning(f"   Continuing without S3 export - metrics will only be saved locally")
+            import traceback
+            logger.error(traceback.format_exc())
+    else:
+        logger.info("ℹ️  S3 export is DISABLED in config")
+        logger.info("   Metrics will be saved locally only")
+    
+    logger.info("=" * 80)
+    
+    # ✅ INITIALIZE SHAP CALCULATOR (optional, for model explainability)
+    logger.info("=" * 80)
+    logger.info("🔍 INITIALIZING SHAP CALCULATOR")
+    logger.info("=" * 80)
+    
+    shap_calculator = SHAPCalculator(max_samples=50, sample_size=20)
+    
+    if shap_calculator.available:
+        logger.info(f"✅ SHAP calculator initialized (explainability enabled)")
+        logger.info(f"   Max background samples: 50")
+        logger.info(f"   Explanation samples: 20")
+    else:
+        logger.warning(f"⚠️  SHAP library not available - model explanations will be skipped")
+        shap_calculator = None
+    
+    logger.info("=" * 80)
+    
     # Create strategy
     logger.info("=" * 80)
     logger.info("🎯 CREATING FEDERATED LEARNING STRATEGY")
@@ -208,7 +283,9 @@ def main():
         config=config,
         initial_parameters=initial_parameters,
         testloader=testloader,
-        malicious_detector=malicious_detector
+        malicious_detector=malicious_detector,
+        s3_exporter=s3_exporter,
+        shap_calculator=shap_calculator
     )
     
     logger.info(f"✅ Strategy created: K8sFederatedStrategy")

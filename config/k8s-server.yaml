@@ -33,3 +33,27 @@ detector:
     model_path: "/app/detector_model/finetuned_model_5gnidd_variant_merged_training"  
   min_rounds_before_detection: 3  
   use_simple_model_if_no_pretrained: false
+
+# ============================================
+# S3 METRICS EXPORT CONFIGURATION
+# ============================================
+s3_export:
+  # Enable/disable S3 export
+  enabled: true
+  
+  # AWS S3 bucket where metrics will be uploaded
+  bucket: "distil-guard-datalake"
+  
+  # AWS region (default: us-east-1)
+  region: "ap-south-1"
+  
+  # S3 path prefix where metrics are organized
+  # Final path will be: s3://bucket/{prefix}/{session-id}/
+  prefix: "k8-sessions/"
+  
+  # Enable gzip compression for JSON uploads (default: true)
+  compress: true
+  
+  # Local directory to save backup copies of all exported data
+  local_export_dir: "/app/temp-data"
+
