@@ -64,3 +64,5 @@ detector_model/
 comparison_data/
 
 .env
+
+k8s/secrets/aws-credentials-secret.yaml
