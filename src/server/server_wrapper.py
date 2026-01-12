@@ -251,42 +251,53 @@ class K8sFederatedStrategy(FedAvg):
         
         # ✅ Export SHAP data SYNCHRONOUSLY (blocking but guaranteed to have data)
         # Data has been collected via update_client_behavior() calls above
-        # NOTE: Start from round 1, not round 2!
+        # NOTE: Matches simulation approach - cumulative CSV file
         if self.malicious_detector:
             logger.info(f"📊 Processing SHAP export for round {server_round} (synchronous)")
             try:
-                # Use detector's SHAP processing method
-                round_shap_data = self.malicious_detector.process_round_for_shap_export(
-                    round_num=server_round
+                # Use detector's SHAP processing method to get CSV rows
+                csv_rows = self.malicious_detector.process_round_for_csv_export(
+                    round_num=server_round,
+                    main_task_accuracy=metrics.get("accuracy", 0.0) if metrics else 0.0,
+                    main_task_loss=metrics.get("loss", 0.0) if metrics else 0.0
                 )
                 
-                if round_shap_data and self.s3_exporter:
-                    # Upload JSON format
-                    json_success = self.s3_exporter.upload_json(
-                        data=round_shap_data,
-                        filename=f"round_{server_round}_shap_analysis.json",
-                        category="shap_analysis"
+                if csv_rows and self.s3_exporter:
+                    # Define CSV columns in exact order (matching simulation)
+                    fieldnames = [
+                        'client_id', 'round_num',
+                        'param_mean', 'param_std', 'param_min', 'param_max', 'param_median', 
+                        'param_range', 'param_abs_mean', 'param_skew', 'param_kurtosis',
+                        'param_neg_ratio', 'param_zero_ratio',
+                        'last_layer_mean', 'last_layer_std', 'last_layer_min', 'last_layer_max',
+                        'last_layer_abs_mean', 'last_layer_neg_ratio',
+                        'first_vs_last_mean_ratio', 'first_vs_last_std_ratio',
+                        'avg_l1_distance', 'avg_l2_distance', 'cosine_similarity',
+                        'true_label', 'predicted_label', 'predicted_prob',
+                        'main_task_accuracy', 'main_task_loss',
+                        'SHAP_Param Mean', 'SHAP_Param Std', 'SHAP_Param Min', 'SHAP_Param Max',
+                        'SHAP_Param Median', 'SHAP_Param Range', 'SHAP_Param Absolute Mean',
+                        'SHAP_Param Skew', 'SHAP_Param Kurtosis', 'SHAP_Param Negative Ratio',
+                        'SHAP_Param Zero Ratio', 'SHAP_Last Layer Mean', 'SHAP_Last Layer Std',
+                        'SHAP_Last Layer Min', 'SHAP_Last Layer Max', 'SHAP_Last Layer Absolute Mean',
+                        'SHAP_Last Layer Negative Ratio', 'SHAP_First vs Last Mean Ratio',
+                        'SHAP_First vs Last Std Ratio', 'SHAP_Avg L1 Distance',
+                        'SHAP_Avg L2 Distance', 'SHAP_Cosine Similarity'
+                    ]
+                    
+                    # Upload to cumulative CSV file (matches simulation: "shap_data.csv")
+                    shap_success = self.s3_exporter.upload_csv(
+                        rows=csv_rows,
+                        s3_key="shap_data.csv",  # ✅ Same as simulation
+                        fieldnames=fieldnames
                     )
                     
-                    if json_success:
-                        logger.info(f"📤 Uploaded SHAP JSON for round {server_round}")
-                    
-                    # Convert to CSV format and upload
-                    csv_rows = self._convert_shap_to_csv(round_shap_data)
-                    if csv_rows:
-                        csv_path = self.s3_exporter.upload_csv(
-                            data=csv_rows,
-                            filename=f"round_{server_round}_features_and_shap.csv",
-                            category="shap_analysis"
-                        )
-                        
-                        if csv_path:
-                            logger.info(f"📤 Uploaded SHAP CSV for round {server_round}")
-                
-                elif round_shap_data:
-                    logger.info(f"✅ SHAP data processed (S3 not available)")
+                    if shap_success:
+                        logger.info(f"📤 Round {server_round} SHAP data appended to cumulative CSV: shap_data.csv")
+                    else:
+                        logger.warning(f"⚠️  Failed to export SHAP CSV data for round {server_round}")
                 else:
-                    logger.warning(f"⚠️  No SHAP data generated for round {server_round}")
+                    logger.warning(f"⚠️  No SHAP data to export for round {server_round}")
                     
             except Exception as e:
                 logger.error(f"❌ SHAP processing failed for round {server_round}: {e}")

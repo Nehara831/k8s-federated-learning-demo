@@ -6,6 +6,7 @@ Adapts the pointwise detector API to match MaliciousClientDetector interface.
 import logging
 from pathlib import Path
 from collections import defaultdict
+from typing import List, Dict, Any
 import numpy as np
 import torch
 import json
@@ -542,3 +543,111 @@ class NumDistilBERTWrapper:
                     for k, v in features.items()
                 }
             }
+    
+    def process_round_for_csv_export(self, round_num: int, main_task_accuracy: float = 0.0, 
+                                     main_task_loss: float = 0.0) -> List[Dict]:
+        """
+        Process round data for CSV export (matching simulation format).
+        Creates one row per client with features + SHAP values.
+        
+        Args:
+            round_num: Current round number
+            main_task_accuracy: Main task accuracy for this round
+            main_task_loss: Main task loss for this round
+            
+        Returns:
+            List of dictionaries (CSV rows), one per client
+        """
+        try:
+            # Check if we have predictions for this round
+            if round_num not in self.round_predictions:
+                logger.warning(f"No predictions found for round {round_num}")
+                return []
+            
+            round_predictions = self.round_predictions[round_num]
+            logger.info(f"📊 Processing {len(round_predictions)} clients for round {round_num} CSV export")
+            
+            csv_rows = []
+            
+            for client_id, (prediction, probability) in round_predictions.items():
+                # Get features for this client
+                if round_num not in self.client_features or client_id not in self.client_features[round_num]:
+                    logger.warning(f"No features found for client {client_id} in round {round_num}")
+                    continue
+                
+                features = self.client_features[round_num][client_id]
+                
+                # Compute SHAP values
+                shap_values = self._compute_feature_importance(features)
+                
+                # Build CSV row (matching simulation format exactly)
+                row = {
+                    'client_id': client_id,
+                    'round_num': round_num,
+                    # Feature values
+                    'param_mean': features.get('param_mean', 0.0),
+                    'param_std': features.get('param_std', 0.0),
+                    'param_min': features.get('param_min', 0.0),
+                    'param_max': features.get('param_max', 0.0),
+                    'param_median': features.get('param_median', 0.0),
+                    'param_range': features.get('param_range', 0.0),
+                    'param_abs_mean': features.get('param_abs_mean', 0.0),
+                    'param_skew': features.get('param_skew', 0.0),
+                    'param_kurtosis': features.get('param_kurtosis', 0.0),
+                    'param_neg_ratio': features.get('param_neg_ratio', 0.0),
+                    'param_zero_ratio': features.get('param_zero_ratio', 0.0),
+                    'last_layer_mean': features.get('last_layer_mean', 0.0),
+                    'last_layer_std': features.get('last_layer_std', 0.0),
+                    'last_layer_min': features.get('last_layer_min', 0.0),
+                    'last_layer_max': features.get('last_layer_max', 0.0),
+                    'last_layer_abs_mean': features.get('last_layer_abs_mean', 0.0),
+                    'last_layer_neg_ratio': features.get('last_layer_neg_ratio', 0.0),
+                    'first_vs_last_mean_ratio': features.get('first_vs_last_mean_ratio', 0.0),
+                    'first_vs_last_std_ratio': features.get('first_vs_last_std_ratio', 0.0),
+                    'avg_l1_distance': features.get('avg_l1_distance', 0.0),
+                    'avg_l2_distance': features.get('avg_l2_distance', 0.0),
+                    'cosine_similarity': features.get('cosine_similarity', 0.0),
+                    # Detection results
+                    'true_label': 0,  # We don't have ground truth in K8s, set to 0
+                    'predicted_label': prediction,
+                    'predicted_prob': probability,
+                    # Main task metrics
+                    'main_task_accuracy': main_task_accuracy,
+                    'main_task_loss': main_task_loss,
+                }
+                
+                # Add SHAP values with exact naming from simulation
+                feature_shap = shap_values.get('feature_shap_values', {})
+                row['SHAP_Param Mean'] = feature_shap.get('param_mean', 0.0)
+                row['SHAP_Param Std'] = feature_shap.get('param_std', 0.0)
+                row['SHAP_Param Min'] = feature_shap.get('param_min', 0.0)
+                row['SHAP_Param Max'] = feature_shap.get('param_max', 0.0)
+                row['SHAP_Param Median'] = feature_shap.get('param_median', 0.0)
+                row['SHAP_Param Range'] = feature_shap.get('param_range', 0.0)
+                row['SHAP_Param Absolute Mean'] = feature_shap.get('param_abs_mean', 0.0)
+                row['SHAP_Param Skew'] = feature_shap.get('param_skew', 0.0)
+                row['SHAP_Param Kurtosis'] = feature_shap.get('param_kurtosis', 0.0)
+                row['SHAP_Param Negative Ratio'] = feature_shap.get('param_neg_ratio', 0.0)
+                row['SHAP_Param Zero Ratio'] = feature_shap.get('param_zero_ratio', 0.0)
+                row['SHAP_Last Layer Mean'] = feature_shap.get('last_layer_mean', 0.0)
+                row['SHAP_Last Layer Std'] = feature_shap.get('last_layer_std', 0.0)
+                row['SHAP_Last Layer Min'] = feature_shap.get('last_layer_min', 0.0)
+                row['SHAP_Last Layer Max'] = feature_shap.get('last_layer_max', 0.0)
+                row['SHAP_Last Layer Absolute Mean'] = feature_shap.get('last_layer_abs_mean', 0.0)
+                row['SHAP_Last Layer Negative Ratio'] = feature_shap.get('last_layer_neg_ratio', 0.0)
+                row['SHAP_First vs Last Mean Ratio'] = feature_shap.get('first_vs_last_mean_ratio', 0.0)
+                row['SHAP_First vs Last Std Ratio'] = feature_shap.get('first_vs_last_std_ratio', 0.0)
+                row['SHAP_Avg L1 Distance'] = feature_shap.get('avg_l1_distance', 0.0)
+                row['SHAP_Avg L2 Distance'] = feature_shap.get('avg_l2_distance', 0.0)
+                row['SHAP_Cosine Similarity'] = feature_shap.get('cosine_similarity', 0.0)
+                
+                csv_rows.append(row)
+            
+            logger.info(f"✅ Converted {len(csv_rows)} client records to CSV format for round {round_num}")
+            return csv_rows
+            
+        except Exception as e:
+            logger.error(f"Failed to process round {round_num} for CSV export: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return []

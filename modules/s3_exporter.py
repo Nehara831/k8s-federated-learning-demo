@@ -362,53 +362,108 @@ class S3MetricsExporter:
         """
         return f"s3://{self.bucket}/{self.s3_prefix}{self.session_id}/"
     
-    def upload_csv(self, data: List[Dict], filename: str, category: str = "metrics") -> Optional[str]:
+    def upload_csv(self, rows: List[Dict], s3_key: str, fieldnames: List[str]) -> bool:
         """
-        Upload CSV data to S3.
+        Upload CSV data to S3 with CUMULATIVE append behavior (matching simulation).
+        Downloads existing file, appends new rows, and re-uploads.
         
         Args:
-            data: List of dictionaries (CSV rows)
-            filename: Name of the CSV file
-            category: Subdirectory category (e.g., 'shap_analysis', 'metrics')
+            rows: List of dictionaries (new rows to append)
+            s3_key: S3 key for the CSV file (e.g., "shap_data.csv")
+            fieldnames: List of column names in exact order
             
         Returns:
-            S3 path if successful, None otherwise
+            bool: True if upload succeeded
         """
-        if not self.is_connected or not data:
-            logger.warning(f"Cannot upload CSV: connected={self.is_connected}, data_empty={not data}")
-            return None
+        if not rows:
+            logger.warning("No CSV rows to upload")
+            return False
         
         try:
-            import pandas as pd
-            from pathlib import Path
+            upload_start = datetime.utcnow()
             
-            # Convert to DataFrame
-            df = pd.DataFrame(data)
+            # Construct full S3 key
+            full_key = f"{self.s3_prefix}{self.session_id}/{s3_key}"
             
-            # Save locally first
-            local_base_path = Path(self.local_export_dir) / self.session_id / category
-            local_base_path.mkdir(parents=True, exist_ok=True)
-            local_path = local_base_path / filename
-            df.to_csv(local_path, index=False)
+            # Step 1: Try to download existing CSV
+            existing_rows = []
             
-            logger.info(f"💾 Saved CSV locally: {local_path} ({len(df)} rows)")
+            if self.s3_client:
+                try:
+                    response = self.s3_client.get_object(Bucket=self.bucket, Key=full_key)
+                    existing_csv_data = response['Body'].read()
+                    
+                    # Decompress if needed
+                    if response.get('ContentEncoding') == 'gzip':
+                        existing_csv_data = gzip.decompress(existing_csv_data)
+                    
+                    existing_csv_data = existing_csv_data.decode('utf-8')
+                    
+                    # Parse existing CSV
+                    csv_reader = csv.DictReader(io.StringIO(existing_csv_data))
+                    existing_rows = list(csv_reader)
+                    logger.debug(f"📥 Downloaded existing CSV with {len(existing_rows)} rows")
+                    
+                except self.s3_client.exceptions.NoSuchKey:
+                    logger.debug(f"CSV file does not exist yet: {full_key}. Creating new file.")
+                except Exception as e:
+                    logger.warning(f"Could not download existing CSV: {e}. Will create new file.")
             
-            # Upload to S3
-            s3_key = f"{self.s3_prefix}{self.session_id}/{category}/{filename}"
+            # Step 2: Combine existing and new rows
+            all_rows = existing_rows + rows
+            logger.info(f"📊 Combining {len(existing_rows)} existing + {len(rows)} new = {len(all_rows)} total rows")
             
-            self.s3_client.upload_file(
-                str(local_path),
-                self.bucket,
-                s3_key
+            # Step 3: Create CSV in memory
+            csv_buffer = io.StringIO()
+            writer = csv.DictWriter(csv_buffer, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(all_rows)
+            
+            csv_data = csv_buffer.getvalue().encode('utf-8')
+            
+            # Step 4: Optionally compress
+            if self.compress:
+                csv_data = gzip.compress(csv_data)
+                content_encoding = 'gzip'
+            else:
+                content_encoding = None
+            
+            # Step 5: Save local copy
+            try:
+                local_path = os.path.join(self.local_export_dir, self.session_id, s3_key)
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                with open(local_path, 'w') as f:
+                    f.write(csv_buffer.getvalue())
+                logger.debug(f"💾 Local CSV saved: {local_path}")
+            except Exception as e:
+                logger.warning(f"Failed to save local CSV: {e}")
+            
+            # Step 6: Upload to S3
+            if not self.s3_client:
+                logger.warning("S3 client not initialized. Skipping CSV upload.")
+                return False
+            
+            extra_args = {'ContentType': 'text/csv'}
+            if content_encoding:
+                extra_args['ContentEncoding'] = content_encoding
+            
+            self.s3_client.put_object(
+                Bucket=self.bucket,
+                Key=full_key,
+                Body=csv_data,
+                **extra_args
             )
             
-            s3_path = f"s3://{self.bucket}/{s3_key}"
-            logger.info(f"✅ Uploaded CSV to S3: {s3_path} ({len(df)} rows, {len(df.columns)} columns)")
+            upload_duration = (datetime.utcnow() - upload_start).total_seconds()
+            logger.info(f"✅ S3 CSV upload completed in {upload_duration:.2f}s: {len(all_rows)} total rows ({len(rows)} new)")
+            logger.debug(f"📍 S3 path: s3://{self.bucket}/{full_key}")
             
-            return s3_path
+            self.is_connected = True
+            return True
             
         except Exception as e:
-            logger.error(f"Failed to upload CSV to S3: {e}")
+            logger.error(f"❌ S3 CSV upload failed: {e}")
             import traceback
             logger.error(traceback.format_exc())
-            return None
+            self.is_connected = False
+            return False
