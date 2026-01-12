@@ -587,8 +587,28 @@ def prepare_server_dataset(config):
             with open(cached_data_path, 'rb') as f:
                 data = pickle.load(f)
             
-            X_test = data['X_test']
-            y_test = data['y_test']
+            # Check the structure of cached data
+            logger.info(f"Cached data keys: {list(data.keys())}")
+            
+            # Handle different cache file formats
+            if 'X_test' in data and 'y_test' in data:
+                X_test = data['X_test']
+                y_test = data['y_test']
+            elif 'test_data' in data:
+                X_test = data['test_data']
+                y_test = data['test_labels']
+            else:
+                # Assume it's the full dataset, split it
+                X = data['X']
+                y = data['y']
+                scaler = data['scaler']
+                
+                # Use the same split ratio as client loading
+                test_size = 0.2
+                from sklearn.model_selection import train_test_split
+                _, X_test, _, y_test = train_test_split(
+                    X, y, test_size=test_size, random_state=42, stratify=y
+                )
             
             logger.info(f"Loaded cached data: X shape {X_test.shape}, y shape {y_test.shape}")
             

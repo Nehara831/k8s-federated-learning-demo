@@ -96,6 +96,12 @@ class K8sFederatedStrategy(FedAvg):
         total_responses = len(results)
         logger.info(f"Round {server_round}: Received {total_responses} client responses")
         
+        # Start new round detection (initializes data structures for THIS round)
+        # NOTE: Start from round 1, not round 2!
+        if self.malicious_detector:
+            self.malicious_detector.start_new_round(server_round)
+            logger.info(f"🔄 Initialized detector for round {server_round}")
+        
         # Separate participating and non-participating clients
         participating_results = []
         malicious_ground_truth = []
@@ -137,10 +143,8 @@ class K8sFederatedStrategy(FedAvg):
         suspicious_clients = set()
         perf_results = None
         
-        if self.malicious_detector and server_round > 1:
-            self.malicious_detector.start_new_round(server_round)
-            
-            # Update detector with ALL client behaviors
+        # Update detector with ALL client behaviors (start from round 1)
+        if self.malicious_detector:
             for client_proxy, fit_res in results:
                 client_id_from_props = fit_res.metrics.get("client_id", None)
                 if client_id_from_props is not None:
@@ -153,6 +157,7 @@ class K8sFederatedStrategy(FedAvg):
                 current_round_params = parameters_to_ndarrays(fit_res.parameters)
                 prev_round_model = self.get_previous_round_model(server_round)
                 
+                # Always update behavior (even for round 1 with no previous model)
                 if prev_round_model is not None:
                     prev_round_params = parameters_to_ndarrays(prev_round_model)
                     
@@ -243,6 +248,52 @@ class K8sFederatedStrategy(FedAvg):
             round_client_metrics,
             metrics
         )
+        
+        # ✅ Export SHAP data SYNCHRONOUSLY (blocking but guaranteed to have data)
+        # Data has been collected via update_client_behavior() calls above
+        # NOTE: Start from round 1, not round 2!
+        if self.malicious_detector:
+            logger.info(f"📊 Processing SHAP export for round {server_round} (synchronous)")
+            try:
+                # Use detector's SHAP processing method
+                round_shap_data = self.malicious_detector.process_round_for_shap_export(
+                    round_num=server_round
+                )
+                
+                if round_shap_data and self.s3_exporter:
+                    # Upload JSON format
+                    json_success = self.s3_exporter.upload_json(
+                        data=round_shap_data,
+                        filename=f"round_{server_round}_shap_analysis.json",
+                        category="shap_analysis"
+                    )
+                    
+                    if json_success:
+                        logger.info(f"📤 Uploaded SHAP JSON for round {server_round}")
+                    
+                    # Convert to CSV format and upload
+                    csv_rows = self._convert_shap_to_csv(round_shap_data)
+                    if csv_rows:
+                        csv_path = self.s3_exporter.upload_csv(
+                            data=csv_rows,
+                            filename=f"round_{server_round}_features_and_shap.csv",
+                            category="shap_analysis"
+                        )
+                        
+                        if csv_path:
+                            logger.info(f"📤 Uploaded SHAP CSV for round {server_round}")
+                
+                elif round_shap_data:
+                    logger.info(f"✅ SHAP data processed (S3 not available)")
+                else:
+                    logger.warning(f"⚠️  No SHAP data generated for round {server_round}")
+                    
+            except Exception as e:
+                logger.error(f"❌ SHAP processing failed for round {server_round}: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+        
+        logger.info(f"✅ Round {server_round} aggregation complete - returning to clients")
         
         return aggregated_params, metrics
     
@@ -455,75 +506,9 @@ class K8sFederatedStrategy(FedAvg):
                 "detector_metrics": perf_results if perf_results else {},
             }
             
-            # Calculate SHAP values if calculator is available
-            if self.shap_calculator and self.shap_calculator.available:
-                logger.info(f"📊 Calculating SHAP values for round {server_round}...")
-                shap_data_list = []
-                
-                try:
-                    # Load global model for SHAP explanation
-                    global_model = create_model_for_dataset(
-                        dataset_type=self.config.dataset.type,
-                        num_classes=self.config.num_classes,
-                        input_size=20 if self.config.dataset.type == "5gnidd" else None
-                    )
-                    global_model.eval()
-                    
-                    # Get test samples for SHAP background
-                    if self.testloader:
-                        test_batch = next(iter(self.testloader))
-                        background_features = test_batch["features"].numpy()
-                        self.shap_calculator.set_background_data(background_features)
-                    
-                    # Calculate SHAP for client predictions
-                    for client_id, metrics in round_client_metrics.items():
-                        try:
-                            # Generate synthetic features based on client metrics for SHAP
-                            # (In practice, you would use actual client local data or aggregated updates)
-                            features = np.array([[
-                                metrics.get("local_accuracy", 0.0),
-                                metrics.get("local_loss", 0.0),
-                            ]])
-                            
-                            # Calculate SHAP values
-                            shap_values = self.shap_calculator.calculate_shap_values(
-                                global_model,
-                                features,
-                                data_type=self.config.dataset.type
-                            )
-                            
-                            if shap_values:
-                                # Get ground truth label
-                                ground_truth_label = "malicious" if client_id in [str(c) for c in malicious_ground_truth] else "benign"
-                                predicted_label = "malicious" if client_id in [str(c) for c in suspicious_clients] else "benign"
-                                
-                                # Add to SHAP CSV data
-                                self.s3_exporter.add_shap_row_data(
-                                    client_id=int(client_id),
-                                    round_num=server_round,
-                                    features={
-                                        "accuracy": metrics.get("local_accuracy", 0.0),
-                                        "loss": metrics.get("local_loss", 0.0),
-                                    },
-                                    shap_values=shap_values,
-                                    main_task_accuracy=metrics.get("local_accuracy", 0.0),
-                                    main_task_loss=metrics.get("local_loss", 0.0),
-                                    predicted_label=predicted_label,
-                                    ground_truth_label=ground_truth_label,
-                                )
-                                shap_data_list.append(client_id)
-                        
-                        except Exception as e:
-                            logger.warning(f"Error calculating SHAP for client {client_id}: {e}")
-                            continue
-                    
-                    logger.info(f"✅ SHAP calculations completed for {len(shap_data_list)} clients")
-                    round_data["shap_clients"] = shap_data_list
-                    
-                except Exception as e:
-                    logger.warning(f"Could not calculate SHAP values: {e}")
-            else:
-                logger.debug("SHAP calculator not available, skipping SHAP calculations")
+            # NOTE: SHAP processing is now handled in background thread via _process_shap_background()
+            # This prevents blocking and uses proper feature extraction from the detector
+            logger.debug("SHAP processing will be handled in background thread (non-blocking)")
             
             # Upload round data JSON
             success = self.s3_exporter.upload_round_data(round_data, server_round)
@@ -535,8 +520,51 @@ class K8sFederatedStrategy(FedAvg):
                 
         except Exception as e:
             logger.error(f"Error exporting round {server_round} metrics to S3: {e}")
-
-
+    
+    def _convert_shap_to_csv(self, round_shap_data: Dict) -> List[Dict]:
+        """
+        Convert SHAP data to CSV format.
+        Each row contains: round, client_id, classification, features, SHAP values.
+        
+        Args:
+            round_shap_data: Dictionary from detector's process_round_for_shap_export()
+            
+        Returns:
+            List of dictionaries for CSV export
+        """
+        csv_rows = []
+        
+        try:
+            round_num = round_shap_data['round_num']
+            
+            for client_data in round_shap_data['clients']:
+                row = {
+                    'round': round_num,
+                    'client_id': client_data['client_id'],
+                    'classification': client_data['classification'],
+                    'malicious_probability': client_data['malicious_probability'],
+                }
+                
+                # Add features with 'feature_' prefix
+                for feature_name, feature_value in client_data['features'].items():
+                    row[f'feature_{feature_name}'] = feature_value
+                
+                # Add SHAP values with 'shap_' prefix
+                if 'shap_values' in client_data:
+                    row['shap_base_value'] = client_data['shap_values']['base_value']
+                    
+                    for feature_name, shap_value in client_data['shap_values']['feature_shap_values'].items():
+                        row[f'shap_{feature_name}'] = shap_value
+                
+                csv_rows.append(row)
+            
+            logger.info(f"Converted {len(csv_rows)} client records to CSV format")
+            return csv_rows
+            
+        except Exception as e:
+            logger.error(f"Failed to convert SHAP data to CSV: {e}")
+            return []
+    
 def create_strategy(config, initial_parameters, testloader=None, malicious_detector=None, s3_exporter=None, shap_calculator=None):
     """
     Create federated learning strategy.
@@ -597,3 +625,48 @@ def create_strategy(config, initial_parameters, testloader=None, malicious_detec
     )
     
     return strategy
+
+
+def _convert_shap_to_csv(self, round_shap_data: Dict) -> List[Dict]:
+    """
+    Convert SHAP data to CSV format.
+    Each row contains: round, client_id, classification, features, SHAP values.
+    
+    Args:
+        round_shap_data: Dictionary from detector's process_round_for_shap_export()
+        
+    Returns:
+        List of dictionaries for CSV export
+    """
+    csv_rows = []
+    
+    try:
+        round_num = round_shap_data['round_num']
+        
+        for client_data in round_shap_data['clients']:
+            row = {
+                'round': round_num,
+                'client_id': client_data['client_id'],
+                'classification': client_data['classification'],
+                'malicious_probability': client_data['malicious_probability'],
+            }
+            
+            # Add features with 'feature_' prefix
+            for feature_name, feature_value in client_data['features'].items():
+                row[f'feature_{feature_name}'] = feature_value
+            
+            # Add SHAP values with 'shap_' prefix
+            if 'shap_values' in client_data:
+                row['shap_base_value'] = client_data['shap_values']['base_value']
+                
+                for feature_name, shap_value in client_data['shap_values']['feature_shap_values'].items():
+                    row[f'shap_{feature_name}'] = shap_value
+            
+            csv_rows.append(row)
+        
+        logger.info(f"Converted {len(csv_rows)} client records to CSV format")
+        return csv_rows
+        
+    except Exception as e:
+        logger.error(f"Failed to convert SHAP data to CSV: {e}")
+        return []

@@ -79,7 +79,7 @@ class NumDistilBERTWrapper:
         
         # Storage for current round detections
         self.current_round_malicious = []
-        self.current_round_predictions = {}  # {client_id: (prediction, probability)}
+        self.round_predictions = {}  # {round_num: {client_id: (prediction, probability)}}
         self.malicious_history = {}  # {round: [client_ids]}
         
         # Feature storage for debugging
@@ -176,7 +176,10 @@ class NumDistilBERTWrapper:
         """
         self.current_round = round_num
         self.current_round_malicious = []
-        self.current_round_predictions = {}
+        # DON'T clear round_predictions - keep historical data for SHAP export
+        # Each round stores its own predictions in round_predictions[round_num]
+        if round_num not in self.round_predictions:
+            self.round_predictions[round_num] = {}
         logger.info(f"🔄 Round {round_num}: Started new round detection")
     
     def update_client_behavior(self, client_id, round_num, current_round_params, prev_round_params):
@@ -192,10 +195,6 @@ class NumDistilBERTWrapper:
         Returns:
             prediction: 0 (benign) or 1 (malicious)
         """
-        if not self.is_trained:
-            logger.warning(f"Detector not trained - skipping client {client_id}")
-            return 0
-        
         try:
             # DEBUG: Log incoming parameter structure
             logger.info(f"📋 Client {client_id} Round {round_num} - Parameter Analysis:")
@@ -235,13 +234,20 @@ class NumDistilBERTWrapper:
             self.client_features[round_num][client_id] = features
             
             # Predict using Num-DistilBERT (features is already a dict)
-            prediction, probability = self.detector.predict(features, threshold=self.threshold)
+            # If detector not trained, use default prediction but still collect data
+            if not self.is_trained:
+                logger.warning(f"Detector not trained - using default prediction for client {client_id}")
+                prediction, probability = 0, 0.0  # Default: benign with 0 confidence
+            else:
+                prediction, probability = self.detector.predict(features, threshold=self.threshold)
             
-            # Store prediction
-            self.current_round_predictions[client_id] = (prediction, probability)
+            # Store prediction in round-specific dictionary (even if detector not trained)
+            if round_num not in self.round_predictions:
+                self.round_predictions[round_num] = {}
+            self.round_predictions[round_num][client_id] = (prediction, probability)
             
-            # Add to malicious list if detected
-            if prediction == 1:
+            # Add to malicious list if detected (only if detector is trained)
+            if self.is_trained and prediction == 1:
                 self.current_round_malicious.append(client_id)
                 logger.warning(
                     f"🚨 Round {round_num}: Client {client_id} detected as MALICIOUS "
@@ -250,7 +256,7 @@ class NumDistilBERTWrapper:
             else:
                 logger.info(
                     f"✅ Round {round_num}: Client {client_id} classified as BENIGN "
-                    f"(probability: {probability:.4f})"
+                    f"(probability: {probability:.4f}, trained: {self.is_trained})"
                 )
             
             return prediction
@@ -308,14 +314,14 @@ class NumDistilBERTWrapper:
         metrics_with_meta['num_detected'] = len(self.current_round_malicious)
         metrics_with_meta['detected_clients'] = self.current_round_malicious
         
-        # Add prediction details (probabilities)
-        if self.current_round_predictions:
+        # Add prediction details (probabilities) for this specific round
+        if round_num in self.round_predictions:
             metrics_with_meta['predictions'] = {
                 str(cid): {
                     'prediction': int(pred),
                     'probability': float(prob)
                 }
-                for cid, (pred, prob) in self.current_round_predictions.items()
+                for cid, (pred, prob) in self.round_predictions[round_num].items()
             }
         
         # Store in history
@@ -397,3 +403,142 @@ class NumDistilBERTWrapper:
             
         except Exception as e:
             logger.error(f"Failed to save final report: {e}")
+    
+    def process_round_for_shap_export(self, round_num):
+        """
+        Process and export round data with SHAP values.
+        This method extracts features, computes SHAP values, and structures data for S3 export.
+        
+        Args:
+            round_num: Current round number
+            
+        Returns:
+            Dictionary with round data including client features and SHAP values
+        """
+        try:
+            # Get all client data from this round
+            round_clients = []
+            
+            # Get predictions for this specific round
+            if round_num not in self.round_predictions:
+                logger.warning(f"No predictions found for round {round_num}")
+                return {
+                    'round_num': round_num,
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'num_samples': 0,
+                    'clients': []
+                }
+            
+            round_predictions = self.round_predictions[round_num]
+            logger.info(f"📊 Processing {len(round_predictions)} clients for round {round_num} SHAP export")
+            
+            for client_id, (prediction, probability) in round_predictions.items():
+                # Get features for this client
+                if round_num not in self.client_features or client_id not in self.client_features[round_num]:
+                    logger.warning(f"No features found for client {client_id} in round {round_num}")
+                    continue
+                
+                features = self.client_features[round_num][client_id]
+                
+                # Get classification
+                classification = "malicious" if prediction == 1 else "benign"
+                
+                # Prepare client data
+                client_data = {
+                    'client_id': int(client_id),
+                    'round_num': round_num,
+                    'classification': classification,
+                    'malicious_probability': float(probability),
+                    'features': {k: float(v) if isinstance(v, (int, float, np.number)) else v 
+                               for k, v in features.items()}
+                }
+                
+                # Add SHAP values (using feature values as importance proxy)
+                # For Num-DistilBERT, we use the trained model's feature embeddings as SHAP proxy
+                shap_values = self._compute_feature_importance(features)
+                client_data['shap_values'] = shap_values
+                
+                round_clients.append(client_data)
+            
+            # Build export data structure
+            round_export_data = {
+                'round_num': round_num,
+                'timestamp': datetime.utcnow().isoformat(),
+                'num_samples': len(round_clients),
+                'clients': round_clients
+            }
+            
+            logger.info(f"✅ Processed round {round_num} with {len(round_clients)} clients for SHAP export")
+            return round_export_data
+            
+        except Exception as e:
+            logger.error(f"Failed to process round {round_num} for SHAP export: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return None
+
+    def _compute_feature_importance(self, features):
+        """
+        Compute feature importance using the detector's attention mechanism.
+        This serves as a proxy for SHAP values specific to Num-DistilBERT.
+        
+        Args:
+            features: Dictionary of client features
+            
+        Returns:
+            Dictionary with SHAP-like importance scores
+        """
+        try:
+            if not self.is_trained:
+                # Fallback: use absolute feature values as importance
+                return {
+                    'base_value': 0.0,
+                    'feature_shap_values': {
+                        k: float(abs(v)) if isinstance(v, (int, float, np.number)) else 0.0
+                        for k, v in features.items()
+                    }
+                }
+            
+            # Convert features to model input
+            feature_array = np.array([
+                features.get(name, 0.0) for name in self.detector.feature_names
+            ])
+            
+            # Scale if scaler is available
+            if self.detector.scaler:
+                feature_array = self.detector.scaler.transform([feature_array])[0]
+            
+            # Get model's feature embeddings (attention weights as importance)
+            x = torch.FloatTensor(feature_array).unsqueeze(0)
+            
+            with torch.no_grad():
+                # Get feature embeddings
+                feature_embeds = self.detector.model.input_embedding(x)
+                
+                # Use embedding magnitudes as feature importance
+                importance = torch.norm(feature_embeds, dim=-1).squeeze().numpy()
+            
+            # Normalize importance scores
+            importance = importance / (importance.sum() + 1e-10)
+            
+            # Map to feature names
+            shap_values = {
+                'base_value': 0.5,  # Neutral baseline
+                'feature_shap_values': {
+                    name: float(imp) 
+                    for name, imp in zip(self.detector.feature_names, importance)
+                }
+            }
+            
+            return shap_values
+            
+        except Exception as e:
+            logger.error(f"Failed to compute feature importance: {e}")
+            # Fallback
+            return {
+                'base_value': 0.0,
+                'feature_shap_values': {
+                    k: float(abs(v)) if isinstance(v, (int, float, np.number)) else 0.0
+                    for k, v in features.items()
+                }
+            }

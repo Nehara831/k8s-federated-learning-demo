@@ -312,9 +312,9 @@ def main():
         config=config,
         initial_parameters=initial_parameters,
         testloader=testloader,
-        malicious_detector=malicious_detector,
-        s3_exporter=s3_exporter,
-        shap_calculator=shap_calculator
+        malicious_detector=malicious_detector,  # ✅ Pass detector
+        s3_exporter=s3_exporter,                # ✅ Pass S3 exporter
+        shap_calculator=shap_calculator         # ✅ Pass SHAP calculator
     )
     
     logger.info(f"✅ Strategy created: K8sFederatedStrategy")

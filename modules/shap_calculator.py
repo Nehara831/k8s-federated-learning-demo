@@ -167,18 +167,33 @@ class SHAPCalculator:
             # Calculate SHAP values for first sample
             shap_values = explainer.shap_values(features[0].reshape(1, -1))
             
-            # Extract feature importance
+            # Extract feature importance (handle different output formats)
             if isinstance(shap_values, list):
                 # Multi-class output, use first class
-                shap_vals = np.abs(shap_values[0][0])
+                if isinstance(shap_values[0], np.ndarray):
+                    if shap_values[0].ndim > 1:
+                        shap_vals = np.abs(shap_values[0][0])  # Shape: (1, features) -> features
+                    else:
+                        shap_vals = np.abs(shap_values[0])  # Already 1D
+                else:
+                    shap_vals = np.abs(shap_values[0])
             else:
                 # Binary/single output
-                shap_vals = np.abs(shap_values[0])
+                if isinstance(shap_values, np.ndarray):
+                    if shap_values.ndim > 1:
+                        shap_vals = np.abs(shap_values[0])  # Shape: (1, features) -> features
+                    else:
+                        shap_vals = np.abs(shap_values)  # Already 1D
+                else:
+                    shap_vals = np.abs(shap_values)
+            
+            # Ensure 1D array
+            shap_vals = np.atleast_1d(shap_vals).flatten()
             
             # Create feature names
             feature_names = [f"feature_{i}" for i in range(len(shap_vals))]
             
-            # Return as dictionary
+            # Return as dictionary with safe conversion to float
             return {
                 name: float(val) for name, val in zip(feature_names, shap_vals)
             }

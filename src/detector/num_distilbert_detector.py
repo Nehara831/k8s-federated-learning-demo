@@ -318,3 +318,44 @@ class NumDistilBERTDetector:
             joblib.dump(self.scaler, scaler_path)
         
         logger.info(f"✅ Saved model to {save_dir}")
+        
+    def aggregate_fit(self, server_round, results):
+        """
+        Aggregate client updates and detect malicious clients.
+        
+        Args:
+            server_round: Current round number
+            results: List of (client_proxy, fit_res) tuples from clients
+        
+        Returns:
+            aggregated_parameters: Aggregated model parameters
+            client_predictions: Dictionary of client_id -> prediction (0 or 1)
+        """
+        client_predictions = {}
+        
+        # Start new round detection
+        if self.malicious_detector:
+            self.malicious_detector.start_new_round(server_round)
+
+        # Process each client for detection
+        for client_proxy, fit_res in results:
+            cid = client_proxy.cid
+            
+            if self.malicious_detector:
+                # Get previous round's model
+                prev_model = self.get_model_from_round(server_round - 1)
+                
+                # Detect malicious behavior
+                prediction = self.malicious_detector.update_client_behavior(
+                    client_id=cid,
+                    round_num=server_round,
+                    current_round_params=parameters_to_ndarrays(fit_res.parameters),
+                    prev_round_params=prev_model
+                )
+                
+                # Store prediction
+                client_predictions[cid] = prediction
+
+        # ...existing aggregation code...
+
+        return aggregated_parameters, client_predictions

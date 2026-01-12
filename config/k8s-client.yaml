@@ -64,4 +64,4 @@ attack:
 config_fit:
   lr: 0.01
   momentum: 0.9
-  local_epochs: 5
+  local_epochs: 1

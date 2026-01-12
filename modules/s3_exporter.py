@@ -113,17 +113,28 @@ class S3MetricsExporter:
             logger.error(f"✗ Unexpected error initializing S3 client: {e}")
             self.is_connected = False
     
-    def upload_json(self, data: Dict[str, Any], s3_key: str) -> bool:
+    def upload_json(self, data: Dict[str, Any], s3_key: str = None, filename: str = None, category: str = None) -> bool:
         """
         Upload JSON data to S3 and save local copy.
         
         Args:
             data: Dictionary to serialize as JSON
-            s3_key: S3 object key (path within bucket)
+            s3_key: S3 object key (path within bucket) - if provided, filename and category are ignored
+            filename: Name of the JSON file (used with category to construct s3_key)
+            category: Subdirectory category (e.g., 'shap_analysis', 'rounds')
             
         Returns:
             bool: True if upload succeeded, False otherwise
         """
+        # Construct s3_key from filename and category if s3_key not provided
+        if s3_key is None:
+            if filename is None:
+                raise ValueError("Either s3_key or filename must be provided")
+            if category:
+                s3_key = f"{category}/{filename}"
+            else:
+                s3_key = filename
+        
         # Serialize to JSON
         json_data = json.dumps(data, indent=2, default=str)
         json_bytes = json_data.encode('utf-8')
@@ -350,3 +361,54 @@ class S3MetricsExporter:
             str: S3 path (e.g., "s3://bucket/sessions/2025-12-08_15-30-45/")
         """
         return f"s3://{self.bucket}/{self.s3_prefix}{self.session_id}/"
+    
+    def upload_csv(self, data: List[Dict], filename: str, category: str = "metrics") -> Optional[str]:
+        """
+        Upload CSV data to S3.
+        
+        Args:
+            data: List of dictionaries (CSV rows)
+            filename: Name of the CSV file
+            category: Subdirectory category (e.g., 'shap_analysis', 'metrics')
+            
+        Returns:
+            S3 path if successful, None otherwise
+        """
+        if not self.is_connected or not data:
+            logger.warning(f"Cannot upload CSV: connected={self.is_connected}, data_empty={not data}")
+            return None
+        
+        try:
+            import pandas as pd
+            from pathlib import Path
+            
+            # Convert to DataFrame
+            df = pd.DataFrame(data)
+            
+            # Save locally first
+            local_base_path = Path(self.local_export_dir) / self.session_id / category
+            local_base_path.mkdir(parents=True, exist_ok=True)
+            local_path = local_base_path / filename
+            df.to_csv(local_path, index=False)
+            
+            logger.info(f"💾 Saved CSV locally: {local_path} ({len(df)} rows)")
+            
+            # Upload to S3
+            s3_key = f"{self.s3_prefix}{self.session_id}/{category}/{filename}"
+            
+            self.s3_client.upload_file(
+                str(local_path),
+                self.bucket,
+                s3_key
+            )
+            
+            s3_path = f"s3://{self.bucket}/{s3_key}"
+            logger.info(f"✅ Uploaded CSV to S3: {s3_path} ({len(df)} rows, {len(df.columns)} columns)")
+            
+            return s3_path
+            
+        except Exception as e:
+            logger.error(f"Failed to upload CSV to S3: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return None
