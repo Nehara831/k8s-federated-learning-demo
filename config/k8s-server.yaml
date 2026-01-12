@@ -56,7 +56,7 @@ s3_export:
   
   # S3 path prefix where metrics are organized
   # Final path will be: s3://bucket/{prefix}/{session-id}/
-  prefix: "k8-sessions/"
+  prefix: "sessions/"
   
   # Enable gzip compression for JSON uploads (default: true)
   compress: true

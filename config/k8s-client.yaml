@@ -24,7 +24,7 @@ attack:
   attack_type: "model_poisoning"  # Options: model_poisoning, poisoned_fl, label_flip, backdoor
   malicious_ratio: 0.4  
   attack_params:
-    attack_start_round: 3
+    attack_start_round: 1
     attack_probability: 1.0
     poison_global_model: true
     
@@ -42,13 +42,6 @@ attack:
     
     constant_noise:
       constant_noise_value: 1.8
-    
-    label_flip:
-      flip_strategy: "targeted"  # Options: targeted, random, class_confusion
-      flip_ratio: 0.5
-      target_label: 0
-      source_label: null
-      num_classes: 9
     
         
     poisoned_fl:

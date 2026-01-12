@@ -83,6 +83,9 @@ class NumDistilBERTWrapper:
         self.round_predictions = {}  # {round_num: {client_id: (prediction, probability)}}
         self.malicious_history = {}  # {round: [client_ids]}
         
+        # ✅ Store ground truth labels per round
+        self.ground_truth_labels = {}  # {round_num: {client_id: is_malicious}}
+        
         # Feature storage for debugging
         self.client_features = defaultdict(dict)  # {round: {client_id: features}}
         
@@ -181,9 +184,11 @@ class NumDistilBERTWrapper:
         # Each round stores its own predictions in round_predictions[round_num]
         if round_num not in self.round_predictions:
             self.round_predictions[round_num] = {}
+        if round_num not in self.ground_truth_labels:
+            self.ground_truth_labels[round_num] = {}
         logger.info(f"🔄 Round {round_num}: Started new round detection")
     
-    def update_client_behavior(self, client_id, round_num, current_round_params, prev_round_params):
+    def update_client_behavior(self, client_id, round_num, current_round_params, prev_round_params, is_malicious=False):
         """
         Extract features and detect if client is malicious.
         
@@ -192,15 +197,22 @@ class NumDistilBERTWrapper:
             round_num: Current round number
             current_round_params: Client's model parameters (list of numpy arrays)
             prev_round_params: Previous round's global model parameters
+            is_malicious: Ground truth label (True if client is malicious)
         
         Returns:
             prediction: 0 (benign) or 1 (malicious)
         """
         try:
+            # ✅ Store ground truth label
+            if round_num not in self.ground_truth_labels:
+                self.ground_truth_labels[round_num] = {}
+            self.ground_truth_labels[round_num][client_id] = 1 if is_malicious else 0
+            
             # DEBUG: Log incoming parameter structure
             logger.info(f"📋 Client {client_id} Round {round_num} - Parameter Analysis:")
             logger.info(f"   Current params type: {type(current_round_params)}")
             logger.info(f"   Prev params type: {type(prev_round_params)}")
+            logger.info(f"   Ground truth: {'MALICIOUS' if is_malicious else 'BENIGN'}")
             
             if isinstance(current_round_params, list):
                 logger.info(f"   Current params count: {len(current_round_params)}")
@@ -608,7 +620,7 @@ class NumDistilBERTWrapper:
                     'avg_l2_distance': features.get('avg_l2_distance', 0.0),
                     'cosine_similarity': features.get('cosine_similarity', 0.0),
                     # Detection results
-                    'true_label': 0,  # We don't have ground truth in K8s, set to 0
+                    'true_label': self.ground_truth_labels.get(round_num, {}).get(client_id, 0),  # ✅ Ground truth from client
                     'predicted_label': prediction,
                     'predicted_prob': probability,
                     # Main task metrics

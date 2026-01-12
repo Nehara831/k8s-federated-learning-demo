@@ -91,6 +91,33 @@ class MaliciousClient(FlowerClient):
         updated_parameters = self.get_parameters()  # No config argument needed
         if self.is_malicious and can_attack and not attack_this_round:
             logger.info(f"Malicious client {self.client_id} did NOT attack in round: {round_num}")
+        
+        # ✅ PERFORM VALIDATION AFTER TRAINING (matching benign client behavior)
+        self.model.eval()
+        val_loss = 0.0
+        val_correct = 0
+        val_total = 0
+        
+        with torch.no_grad():
+            for batch in self.valloader:
+                if isinstance(batch, dict):
+                    data, target = batch["features"], batch["label"]
+                else:
+                    data, target = batch
+                
+                data, target = data.to(self.device), target.to(self.device)
+                output = self.model(data)
+                loss = criterion(output, target)
+                val_loss += loss.item()
+                
+                _, predicted = torch.max(output.data, 1)
+                val_total += target.size(0)
+                val_correct += (predicted == target).sum().item()
+        
+        local_accuracy = float(val_correct) / val_total if val_total > 0 else 0.0
+        local_loss = val_loss / len(self.valloader) if len(self.valloader) > 0 else 0.0
+        
+        logger.info(f"Malicious Client {self.client_id} - Validation: Accuracy: {local_accuracy:.4f}, Loss: {local_loss:.6f}")
 
         # Apply parameter-based attacks after training
         attacked_flag = False
@@ -163,7 +190,11 @@ class MaliciousClient(FlowerClient):
                            f"Lambda: {attack_stats.get('lambda', 0):.2f}, "
                            f"Benign estimates: {attack_stats.get('num_benign_estimates', 0)}")
         
-        metrics = {}
+        # ✅ Build metrics with validation results (matching benign client)
+        metrics = {
+            "local_accuracy": float(local_accuracy),
+            "local_loss": float(local_loss),
+        }
         
         # Report attack type and whether this client actually attacked this round
         if self.is_malicious and attack_this_round:

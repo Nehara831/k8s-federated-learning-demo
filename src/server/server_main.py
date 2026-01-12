@@ -343,5 +343,19 @@ def main():
     logger.info("✅ FL SERVER FINISHED")
     logger.info("=" * 80)
     
+    # Upload final summary to S3 after training completes
+    if s3_exporter and strategy:
+        try:
+            logger.info("📊 Uploading final training summary to S3...")
+            summary_success = strategy.upload_final_summary()
+            if summary_success:
+                logger.info(f"✅ Final summary uploaded: {s3_exporter.get_session_path()}summary.json")
+            else:
+                logger.warning("⚠️  Final summary upload failed")
+        except Exception as e:
+            logger.error(f"❌ Error uploading final summary: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+    
 if __name__ == "__main__":
     main()
