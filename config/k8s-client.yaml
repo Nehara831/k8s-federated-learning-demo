@@ -28,7 +28,6 @@ attack:
     attack_probability: 1.0
     poison_global_model: true
     
-    # For model_poisoning attack
     poisoning_method: "constant_noise"  # Options: constant_noise, scale, invert, gaussian, zero
     target_layers: "all"  # Options: all, first, last, or [0, 2, 4]
     layer_specific_factor: 1.0
@@ -45,7 +44,7 @@ attack:
     
         
     poisoned_fl:
-      sign_vector_seed: 42  # CRITICAL: Must be same for all malicious clients
+      sign_vector_seed: 42  
       initial_lambda: 8.0
       lambda_increase_factor: 1.0
       lambda_decrease_factor: 0.7

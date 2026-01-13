@@ -38,7 +38,6 @@ class NumDistilBERTWrapper:
         self.model_config = model_config
         self.reference_model = reference_model
         
-        # Extract layer names from reference model for parameter mapping
         self.layer_names = None
         if reference_model is not None:
             self._extract_layer_names_from_model(reference_model)
