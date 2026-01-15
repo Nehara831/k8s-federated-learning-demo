@@ -66,3 +66,4 @@ comparison_data/
 .env
 
 k8s/secrets/aws-credentials-secret.yaml
+usage_commands.txt

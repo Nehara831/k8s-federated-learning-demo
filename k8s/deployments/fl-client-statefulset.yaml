@@ -4,7 +4,7 @@ metadata:
   name: fl-client-headless
   namespace: federated-learning
 spec:
-  clusterIP: None  # Headless service required for StatefulSet
+  clusterIP: None
   selector:
     app: fl-client
   ports:
@@ -18,7 +18,7 @@ metadata:
   namespace: federated-learning
 spec:
   serviceName: fl-client-headless
-  replicas: 10  # Scale to 10 clients
+  replicas: 10
   selector:
     matchLabels:
       app: fl-client
@@ -49,14 +49,13 @@ spec:
           mountPath: /app/outputs/shared
         - name: client-params-output
           mountPath: /app/outputs
-        # Removed src, config, modules volume mounts - using baked-in code from Docker image
         resources:
           requests:
-            memory: "1Gi"      # Reduced from 3Gi
-            cpu: "500m"        # Reduced from 1000m
+            memory: "1Gi"
+            cpu: "500m"
           limits:
-            memory: "1.5Gi"    # Reduced from 4Gi
-            cpu: "1000m"       # Reduced from 2000m
+            memory: "1.5Gi"
+            cpu: "1000m"
       volumes:
       - name: client-config
         configMap:
@@ -71,4 +70,3 @@ spec:
         hostPath:
           path: /host/client_params
           type: DirectoryOrCreate
-      # Removed src, config, modules volume definitions - using baked-in code from Docker image

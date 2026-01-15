@@ -97,7 +97,6 @@ def create_detector(config, reference_model):
             logger.info(f"   Threshold: {config.detector.get('threshold', 0.5)}")
             
         elif detector_type in ['krum', 'multi_krum', 'fedguard']:
-            # ✅ Use existing MaliciousClientDetector (Krum/Multi-Krum/FedGuard)
             logger.info(f"📊 Loading {detector_type.upper()} detector...")
             
             min_rounds = config.detector.get('min_rounds_before_detection', 2)

@@ -548,7 +548,7 @@ class K8sFederatedStrategy(FedAvg):
                 if is_suspicious:
                     status = "Warning"  # Detected as malicious
                 elif client_type == "Malicious" and not is_suspicious:
-                    status = "Inactive"  # Malicious but not detected (bypassed defense)
+                    status = "Warning"  
                 else:
                     status = "Active"  # Benign and active
                 

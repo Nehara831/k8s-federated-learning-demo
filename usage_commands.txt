@@ -2,6 +2,17 @@
 # COMPLETE FL WORKFLOW
 # ============================================
 
+# 0. Fix Docker disk space issues (run if getting storage errors)
+# Option A: Safe cleanup (keeps tagged images, removes unused containers/volumes/build cache)
+docker system prune --volumes -f
+
+# Option B: Aggressive cleanup (removes ALL unused images including fl-server:latest and fl-client:latest)
+# Only use if you're okay rebuilding images afterward
+docker system prune -a --volumes -f
+
+# Clean up inside Minikube VM (after Minikube starts)
+minikube ssh -- docker system prune -a -f
+
 # 1. Start Minikube
 minikube start --memory=16384 --cpus=6 --driver=docker
 
@@ -15,8 +26,8 @@ sleep 5 && echo "✓ Directories mounted into Minikube VM"
 kubectl get pods -n federated-learning
 
 # 3. Scale down everything (clean slate)
-kubectl scale deployment fl-server --replicas=1 -n federated-learning && \
-kubectl scale statefulset fl-clients --replicas=10 -n federated-learning && \
+kubectl scale deployment fl-server --replicas=0 -n federated-learning && \
+kubectl scale statefulset fl-clients --replicas=0 -n federated-learning && \
 echo "✓ Scaled down" && kubectl get pods -n federated-learning
 
 # 4. Rebuild images (if code changed)
@@ -25,10 +36,20 @@ docker build -t fl-server:latest -f docker/server/Dockerfile . && \
 docker build -t fl-client:latest -f docker/client/Dockerfile .
 echo "✓ Images rebuilt"
 
+# 4a. Check if images exist in Minikube's Docker
+eval $(minikube docker-env) && docker images | grep -E "fl-server|fl-client"
+
 # 5. Update configs (if changed)
 kubectl create configmap fl-server-config --from-file=config/k8s-server.yaml -n federated-learning --dry-run=client -o yaml | kubectl apply -f - && \
 kubectl create configmap fl-client-config --from-file=config/k8s-client.yaml -n federated-learning --dry-run=client -o yaml | kubectl apply -f - && \
 echo "✓ Configs updated"
+
+
+# Restart everything
+kubectl rollout restart deployment/fl-server -n federated-learning && \
+kubectl delete pods -l app=fl-client -n federated-learning && \
+echo "✓ Restarted server and clients"
+
 
 # 5a. Apply deployment changes (for hostPath volumes)
 kubectl apply -f k8s/deployments/fl-server.yaml && \
@@ -42,11 +63,25 @@ kubectl scale statefulset fl-clients --replicas=10 -n federated-learning && \
 echo "✓ Scaled up: 1 server + 10 clients" && \
 kubectl get pods -n federated-learning
 
+
+
 # 7. Monitor logs
 kubectl logs -f deployment/fl-server -n federated-learning
 
+# 7a. Auto-stop after training completion (monitors logs and scales down automatically)
+(kubectl logs -f deployment/fl-server -n federated-learning 2>&1 & echo $! > /tmp/kubectl_logs.pid) | \
+  grep -q "✅ FL SERVER FINISHED" && \
+  sleep 10 && \
+  kubectl scale deployment fl-server --replicas=0 -n federated-learning && \
+  kubectl scale statefulset fl-clients --replicas=0 -n federated-learning && \
+  kill $(cat /tmp/kubectl_logs.pid) 2>/dev/null && \
+  echo "✓ Training complete - pods automatically stopped"
+
+
+
+
 # 8. Monitor specific client
-kubectl logs -f fl-clients-8 -n federated-learning
+kubectl logs -f fl-clients-0 -n federated-learning
 
 # ============================================
 # QUICK RESTART (without rebuild)
@@ -59,10 +94,7 @@ kubectl wait --for=condition=available deployment/fl-server -n federated-learnin
 # Restart clients only
 kubectl delete pods -l app=fl-client -n federated-learning
 
-# Restart everything
-kubectl rollout restart deployment/fl-server -n federated-learning && \
-kubectl delete pods -l app=fl-client -n federated-learning && \
-echo "✓ Restarted server and clients"
+
 
 # ============================================
 # VERIFY LOCAL FILE SYNC

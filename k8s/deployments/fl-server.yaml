@@ -13,7 +13,7 @@ spec:
       labels:
         app: fl-server
     spec:
-      restartPolicy: Always  # <-- Must be Always for Deployment!
+      restartPolicy: Always  
       containers:
       - name: fl-server
         image: fl-server:latest
@@ -33,7 +33,7 @@ spec:
             secretKeyRef:
               name: aws-credentials
               key: AWS_ACCESS_KEY_ID
-              optional: true  # Won't fail if secret doesn't exist
+              optional: true  
         - name: AWS_SECRET_ACCESS_KEY
           valueFrom:
             secretKeyRef:
@@ -63,7 +63,6 @@ spec:
         - name: detector-models
           mountPath: /app/detector_model
           readOnly: true
-        # Removed src, config, modules volume mounts - using baked-in code from Docker image
         resources:
           requests:
             memory: "2Gi"
@@ -93,4 +92,3 @@ spec:
         hostPath:
           path: /host/detector_model
           type: Directory
-      # Removed src, config, modules volume definitions - using baked-in code from Docker image

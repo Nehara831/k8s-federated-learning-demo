@@ -11,7 +11,7 @@ dataset:
     alpha: 0.1  
     partition_seed: 123  
 
-num_rounds: 5
+num_rounds: 15
 num_clients: 10
 batch_size: 8
 num_classes: 9

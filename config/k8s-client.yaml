@@ -10,7 +10,7 @@ dataset:
   num_classes: 9
   
   distribution:
-    type: "label_skew"  # Options: 'iid', 'non_iid', 'label_skew'
+    type: "iid"  # Options: 'iid', 'non_iid', 'label_skew'
     quantity_skew_ratio: 3.0
     alpha: 0.1
     partition_seed: 123
@@ -25,17 +25,14 @@ attack:
   malicious_ratio: 0.4  
   attack_params:
     attack_start_round: 1
-    attack_probability: 1.0
+    attack_probability: 0.6
     poison_global_model: true
     
     poisoning_method: "constant_noise"  # Options: constant_noise, scale, invert, gaussian, zero
-    target_layers: "all"  # Options: all, first, last, or [0, 2, 4]
+    target_layers: "all"  
     layer_specific_factor: 1.0
     
-    noise_factor: 0.5
-    gaussian_mean: 0.0
-    gaussian_std: 1.0
-    
+
     scale:
       scale_factor: 1.4
     

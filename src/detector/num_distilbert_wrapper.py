@@ -128,27 +128,21 @@ class NumDistilBERTWrapper:
         
         param_dict = {}
         
-        # Get expected parameter names from the model
         if self.layer_names and len(param_list) > 0:
-            # Flower sends ALL state_dict items in the same order as model.state_dict().items()
-            # This includes weights, biases, AND BatchNorm buffers
+            
             expected_param_count = len(self.layer_names)
             
             if len(param_list) == expected_param_count:
-                # Perfect match - use actual layer names
                 for name, param in zip(self.layer_names, param_list):
                     param_dict[name] = param
                 logger.debug(f"✅ Mapped {len(param_list)} parameters using model layer names")
                 
             else:
-                # Mismatch detected - need to handle this carefully
                 logger.warning(
                     f"⚠️  Parameter count mismatch: {len(param_list)} params vs "
                     f"{expected_param_count} expected layer names"
                 )
                 
-                # CRITICAL FIX: Re-extract layer names to include ALL state_dict keys
-                # including BatchNorm buffers
                 if self.reference_model is not None:
                     all_keys = list(self.reference_model.state_dict().keys())
                     
@@ -158,12 +152,10 @@ class NumDistilBERTWrapper:
                         logger.info(f"✅ Mapped using complete state_dict keys (including BatchNorm)")
                         return param_dict
                 
-                # Fallback: use generic names
                 for i, param in enumerate(param_list):
                     param_dict[f'layer_{i}'] = param
                 logger.warning("⚠️  Using generic layer names - feature extraction may be incomplete")
         else:
-            # No layer names available
             for i, param in enumerate(param_list):
                 param_dict[f'layer_{i}'] = param
             logger.info("Using generic layer names (no reference model)")
@@ -179,8 +171,6 @@ class NumDistilBERTWrapper:
         """
         self.current_round = round_num
         self.current_round_malicious = []
-        # DON'T clear round_predictions - keep historical data for SHAP export
-        # Each round stores its own predictions in round_predictions[round_num]
         if round_num not in self.round_predictions:
             self.round_predictions[round_num] = {}
         if round_num not in self.ground_truth_labels:
@@ -202,12 +192,10 @@ class NumDistilBERTWrapper:
             prediction: 0 (benign) or 1 (malicious)
         """
         try:
-            # ✅ Store ground truth label
             if round_num not in self.ground_truth_labels:
                 self.ground_truth_labels[round_num] = {}
             self.ground_truth_labels[round_num][client_id] = 1 if is_malicious else 0
             
-            # DEBUG: Log incoming parameter structure
             logger.info(f"📋 Client {client_id} Round {round_num} - Parameter Analysis:")
             logger.info(f"   Current params type: {type(current_round_params)}")
             logger.info(f"   Prev params type: {type(prev_round_params)}")
@@ -217,19 +205,15 @@ class NumDistilBERTWrapper:
                 logger.info(f"   Current params count: {len(current_round_params)}")
                 logger.info(f"   Sample shapes: {[p.shape for p in current_round_params[:3]]}")
             
-            # Convert parameters using proper layer name mapping
             param_dict = self._convert_params_to_dict(current_round_params)
             ref_param_dict = self._convert_params_to_dict(prev_round_params)
             
-            # DEBUG: Log conversion results
             logger.info(f"   ✅ Converted to dict with {len(param_dict)} keys")
             if ref_param_dict:
                 logger.info(f"   ✅ Reference dict has {len(ref_param_dict)} keys")
             
-            # DEBUG: Log dictionary structure before feature extraction
             logger.info(f"   📊 Parameter dict keys: {list(param_dict.keys())[:5]}... (showing first 5)")
             
-            # Extract features from client's model update
             features = extract_model_features(
                 param_dict,
                 client_id,
@@ -237,23 +221,18 @@ class NumDistilBERTWrapper:
                 reference_params=ref_param_dict
             )
             
-            # DEBUG: Log extracted features
             logger.info(f"   ✅ Extracted {len(features)} features from client {client_id}")
             
-            # Store features for debugging
             if round_num not in self.client_features:
                 self.client_features[round_num] = {}
             self.client_features[round_num][client_id] = features
             
-            # Predict using Num-DistilBERT (features is already a dict)
-            # If detector not trained, use default prediction but still collect data
             if not self.is_trained:
                 logger.warning(f"Detector not trained - using default prediction for client {client_id}")
                 prediction, probability = 0, 0.0  # Default: benign with 0 confidence
             else:
                 prediction, probability = self.detector.predict(features, threshold=self.threshold)
             
-            # Store prediction in round-specific dictionary (even if detector not trained)
             if round_num not in self.round_predictions:
                 self.round_predictions[round_num] = {}
             self.round_predictions[round_num][client_id] = (prediction, probability)

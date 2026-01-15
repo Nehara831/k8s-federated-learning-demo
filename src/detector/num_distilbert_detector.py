@@ -1,11 +1,4 @@
-"""
-Num-DistilBERT: Pointwise Malicious Client Detector
-Treats each client as an independent sample (not set-based).
-Uses FT-Transformer style feature embedding + DistilBERT.
 
-This approach maximizes training data by treating every client as a sample,
-unlike FedGuard which treats each round as a sample.
-"""
 
 import torch
 import torch.nn as nn
@@ -37,12 +30,7 @@ class FeatureTokenizer(nn.Module):
         self.layer_norm = nn.LayerNorm(embedding_dim)
 
     def forward(self, x):
-        """
-        Args:
-            x: [batch_size, num_features] - Raw feature values
-        Returns:
-            [batch_size, num_features, embedding_dim] - Feature token embeddings
-        """
+        
         embeddings = []
         for i, projector in enumerate(self.feature_projectors):
             feat_val = x[:, i].unsqueeze(1)  # [batch_size, 1]
@@ -113,17 +101,9 @@ class NumDistilBERT(nn.Module):
 
 
 class NumDistilBERTDetector:
-    """
-    Wrapper class for Num-DistilBERT detector.
-    Provides API compatible with training scripts.
-    """
+    
     def __init__(self, num_features=22, model_path=None, scaler_path=None):
-        """
-        Args:
-            num_features: Number of input features (default: 22)
-            model_path: Path to pre-trained model checkpoint (optional)
-            scaler_path: Path to fitted MinMaxScaler (optional)
-        """
+        
         self.num_features = num_features
         self.model = NumDistilBERT(num_features)
         self.scaler = None
@@ -269,7 +249,6 @@ class NumDistilBERTDetector:
             return [0] * len(features_list), [0.5] * len(features_list)
     
     def save(self, save_dir):
-        """Save model and scaler"""
         save_dir = Path(save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
         
@@ -289,17 +268,7 @@ class NumDistilBERTDetector:
         logger.info(f"✅ Saved model to {save_dir}")
         
     def aggregate_fit(self, server_round, results):
-        """
-        Aggregate client updates and detect malicious clients.
         
-        Args:
-            server_round: Current round number
-            results: List of (client_proxy, fit_res) tuples from clients
-        
-        Returns:
-            aggregated_parameters: Aggregated model parameters
-            client_predictions: Dictionary of client_id -> prediction (0 or 1)
-        """
         client_predictions = {}
         
         if self.malicious_detector:
