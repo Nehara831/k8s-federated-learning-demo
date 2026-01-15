@@ -8,6 +8,10 @@ from flwr.common import Parameters, FitRes, parameters_to_ndarrays, ndarrays_to_
 from flwr.server.client_proxy import ClientProxy
 import pickle
 from pathlib import Path
+from modules.s3_exporter import S3MetricsExporter
+from modules.shap_calculator import SHAPCalculator
+import time
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +26,8 @@ class K8sFederatedStrategy(FedAvg):
         config,
         testloader=None,
         malicious_detector=None,
+        s3_exporter=None,
+        shap_calculator=None,
         fraction_fit: float = 1.0,
         fraction_evaluate: float = 1.0,
         min_fit_clients: int = 2,
@@ -37,7 +43,24 @@ class K8sFederatedStrategy(FedAvg):
         self.config = config
         self.testloader = testloader
         self.malicious_detector = malicious_detector
+        self.s3_exporter = s3_exporter
+        self.shap_calculator = shap_calculator
         self._saved_initial_parameters = initial_parameters
+        
+        # Track round metrics for S3 export
+        self.round_start_time = None
+        self.round_metrics = {}
+        self.client_performance_history = {}
+        
+        # Track complete history for final summary (matching simulation)
+        self.round_history = []  # List of all round data dictionaries
+        self.cumulative_alerts = []  # Track all malicious detection alerts
+        
+        # Store last evaluation metrics for globalMetrics section
+        self.last_evaluation_metrics = {
+            "accuracy": 0.0,
+            "loss": 0.0
+        }
         
         # Initialize parent strategy
         super().__init__(
@@ -77,13 +100,23 @@ class K8sFederatedStrategy(FedAvg):
         This method is detector-agnostic - works with any detector implementation.
         """
         
+        # Start timing the round
+        self.round_start_time = time.time()
+        
         total_responses = len(results)
         logger.info(f"Round {server_round}: Received {total_responses} client responses")
+        
+        # Start new round detection (initializes data structures for THIS round)
+        # NOTE: Start from round 1, not round 2!
+        if self.malicious_detector:
+            self.malicious_detector.start_new_round(server_round)
+            logger.info(f"🔄 Initialized detector for round {server_round}")
         
         # Separate participating and non-participating clients
         participating_results = []
         malicious_ground_truth = []
         all_client_ids = []
+        round_client_metrics = {}
         
         for client_proxy, fit_res in results:
             # Get deterministic client_id from metrics (not network address)
@@ -94,6 +127,24 @@ class K8sFederatedStrategy(FedAvg):
                 client_id_str = str(client_proxy.cid)
             
             all_client_ids.append(client_id_str)
+            
+            # Store client metrics for S3 export
+            round_client_metrics[client_id_str] = {
+                "local_accuracy": fit_res.metrics.get("local_accuracy", 0),
+                "local_loss": fit_res.metrics.get("local_loss", 0),
+                "attack_type": fit_res.metrics.get("attack_type", "unknown"),
+            }
+            
+            # Track client performance history (matching simulation format)
+            if f"client_{client_id_str}" not in self.client_performance_history:
+                self.client_performance_history[f"client_{client_id_str}"] = []
+            
+            self.client_performance_history[f"client_{client_id_str}"].append({
+                "round": server_round,
+                "accuracy": round(fit_res.metrics.get("local_accuracy", 0.0), 4),
+                "loss": round(fit_res.metrics.get("local_loss", 0.0), 4),
+                "attacked": fit_res.metrics.get("attack_type", "unknown") != "unknown"
+            })
             
             is_non_participating = fit_res.metrics.get("non_participating", False)
             logger.info(f"Metrics: {fit_res.metrics} Client {client_id_str} (network: {client_proxy.cid})")
@@ -110,10 +161,11 @@ class K8sFederatedStrategy(FedAvg):
         total_client_count = len(all_client_ids)
         
         # ✅ MALICIOUS DETECTION (works with ANY detector)
-        if self.malicious_detector and server_round > 1:
-            self.malicious_detector.start_new_round(server_round)
-            
-            # Update detector with ALL client behaviors
+        suspicious_clients = set()
+        perf_results = None
+        
+        # Update detector with ALL client behaviors (start from round 1)
+        if self.malicious_detector:
             for client_proxy, fit_res in results:
                 client_id_from_props = fit_res.metrics.get("client_id", None)
                 if client_id_from_props is not None:
@@ -126,19 +178,23 @@ class K8sFederatedStrategy(FedAvg):
                 current_round_params = parameters_to_ndarrays(fit_res.parameters)
                 prev_round_model = self.get_previous_round_model(server_round)
                 
+                # Check if client is actually malicious (ground truth)
+                is_actually_malicious = client_id_str in malicious_ground_truth
+                
+                # Always update behavior (even for round 1 with no previous model)
                 if prev_round_model is not None:
                     prev_round_params = parameters_to_ndarrays(prev_round_model)
                     
-                    # Update detector (works for Krum, FedGuard, Num-DistilBERT, etc.)
+                    # ✅ Update detector with ground truth label
                     result = self.malicious_detector.update_client_behavior(
                         client_id, 
                         server_round, 
                         current_round_params, 
-                        prev_round_params
+                        prev_round_params,
+                        is_malicious=is_actually_malicious  # ✅ Pass ground truth
                     )
                     
-                    is_actually_malicious = client_id_str in malicious_ground_truth
-                    logger.info(f"Client {client_id_str}: Prediction={result}, Actually malicious={is_actually_malicious}")
+                    logger.info(f"Client {client_id_str}: Prediction={result}, Ground truth={'MALICIOUS' if is_actually_malicious else 'BENIGN'}")
                     
                     if not is_actually_malicious and result == 1:
                         logger.info(f"[+] DEBUG: Client {client_id} round {server_round} misclassified as malicious")
@@ -205,6 +261,75 @@ class K8sFederatedStrategy(FedAvg):
         metrics["participating_clients"] = len(participating_results)
         metrics["participation_rate"] = len(participating_results) / total_responses if total_responses > 0 else 0
         
+        # Export round metrics to S3
+        self._export_round_metrics_to_s3(
+            server_round, 
+            participating_results, 
+            malicious_ground_truth, 
+            suspicious_clients, 
+            perf_results, 
+            total_client_count,
+            round_client_metrics,
+            metrics
+        )
+        
+        # ✅ Export SHAP data SYNCHRONOUSLY (blocking but guaranteed to have data)
+        # Data has been collected via update_client_behavior() calls above
+        # NOTE: Matches simulation approach - cumulative CSV file
+        if self.malicious_detector:
+            logger.info(f"📊 Processing SHAP export for round {server_round} (synchronous)")
+            try:
+                # Use detector's SHAP processing method to get CSV rows
+                csv_rows = self.malicious_detector.process_round_for_csv_export(
+                    round_num=server_round,
+                    main_task_accuracy=metrics.get("accuracy", 0.0) if metrics else 0.0,
+                    main_task_loss=metrics.get("loss", 0.0) if metrics else 0.0
+                )
+                
+                if csv_rows and self.s3_exporter:
+                    # Define CSV columns in exact order (matching simulation)
+                    fieldnames = [
+                        'client_id', 'round_num',
+                        'param_mean', 'param_std', 'param_min', 'param_max', 'param_median', 
+                        'param_range', 'param_abs_mean', 'param_skew', 'param_kurtosis',
+                        'param_neg_ratio', 'param_zero_ratio',
+                        'last_layer_mean', 'last_layer_std', 'last_layer_min', 'last_layer_max',
+                        'last_layer_abs_mean', 'last_layer_neg_ratio',
+                        'first_vs_last_mean_ratio', 'first_vs_last_std_ratio',
+                        'avg_l1_distance', 'avg_l2_distance', 'cosine_similarity',
+                        'true_label', 'predicted_label', 'predicted_prob',
+                        'main_task_accuracy', 'main_task_loss',
+                        'SHAP_Param Mean', 'SHAP_Param Std', 'SHAP_Param Min', 'SHAP_Param Max',
+                        'SHAP_Param Median', 'SHAP_Param Range', 'SHAP_Param Absolute Mean',
+                        'SHAP_Param Skew', 'SHAP_Param Kurtosis', 'SHAP_Param Negative Ratio',
+                        'SHAP_Param Zero Ratio', 'SHAP_Last Layer Mean', 'SHAP_Last Layer Std',
+                        'SHAP_Last Layer Min', 'SHAP_Last Layer Max', 'SHAP_Last Layer Absolute Mean',
+                        'SHAP_Last Layer Negative Ratio', 'SHAP_First vs Last Mean Ratio',
+                        'SHAP_First vs Last Std Ratio', 'SHAP_Avg L1 Distance',
+                        'SHAP_Avg L2 Distance', 'SHAP_Cosine Similarity'
+                    ]
+                    
+                    # Upload to cumulative CSV file (matches simulation: "shap_data.csv")
+                    shap_success = self.s3_exporter.upload_csv(
+                        rows=csv_rows,
+                        s3_key="shap_analysis.csv",  # ✅ Same as simulation
+                        fieldnames=fieldnames
+                    )
+                    
+                    if shap_success:
+                        logger.info(f"📤 Round {server_round} SHAP data appended to cumulative CSV: shap_data.csv")
+                    else:
+                        logger.warning(f"⚠️  Failed to export SHAP CSV data for round {server_round}")
+                else:
+                    logger.warning(f"⚠️  No SHAP data to export for round {server_round}")
+                    
+            except Exception as e:
+                logger.error(f"❌ SHAP processing failed for round {server_round}: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+        
+        logger.info(f"✅ Round {server_round} aggregation complete - returning to clients")
+        
         return aggregated_params, metrics
     
     def aggregate_evaluate(
@@ -239,6 +364,14 @@ class K8sFederatedStrategy(FedAvg):
             metrics["eval_total_responses"] = total_responses
             metrics["eval_participating_clients"] = len(participating_results)
             metrics["eval_non_participating_clients"] = non_participating_count
+        
+        # Store evaluation metrics for next round's export
+        if aggregated_loss is not None:
+            self.last_evaluation_metrics["loss"] = aggregated_loss
+        if metrics and "accuracy" in metrics:
+            self.last_evaluation_metrics["accuracy"] = metrics["accuracy"]
+        
+        logger.info(f"📊 Round {server_round} evaluation: accuracy={self.last_evaluation_metrics['accuracy']:.4f}, loss={self.last_evaluation_metrics['loss']:.4f}")
         
         return aggregated_loss, metrics
     
@@ -381,9 +514,323 @@ class K8sFederatedStrategy(FedAvg):
         except Exception as e:
             logger.error(f"Failed to save global model round {round_num}: {e}")
             return ""
-
-
-def create_strategy(config, initial_parameters, testloader=None, malicious_detector=None):
+    
+    def _export_round_metrics_to_s3(
+        self,
+        server_round: int,
+        participating_results: List,
+        malicious_ground_truth: List,
+        suspicious_clients: set,
+        perf_results: Optional[Dict],
+        total_client_count: int,
+        round_client_metrics: Dict,
+        aggregated_metrics: Dict
+    ):
+        """
+        Export comprehensive round metrics to S3.
+        Uploads round data JSON and collects SHAP data for later aggregated CSV upload.
+        """
+        if not self.s3_exporter:
+            logger.debug("S3 exporter not initialized, skipping metrics export")
+            return
+        
+        try:
+            from datetime import datetime
+            
+            # Build clients array (matching simulation format)
+            clients_array = []
+            for client_id_str, metrics in round_client_metrics.items():
+                client_type = "Malicious" if client_id_str in malicious_ground_truth else "Benign"
+                is_suspicious = int(client_id_str) in suspicious_clients if suspicious_clients else False
+                attack_type = metrics.get("attack_type", "unknown")
+                
+                # Determine status
+                if is_suspicious:
+                    status = "Warning"  # Detected as malicious
+                elif client_type == "Malicious" and not is_suspicious:
+                    status = "Warning"  
+                else:
+                    status = "Active"  # Benign and active
+                
+                client_obj = {
+                    "id": f"client_{client_id_str}",
+                    "type": client_type,
+                    "accuracy": round(metrics.get("local_accuracy", 0.0), 4),
+                    "loss": round(metrics.get("local_loss", 0.0), 4),
+                    "divergence": None,
+                    "learningRate": self.config.config_fit.lr if hasattr(self.config, 'config_fit') else 0.01,
+                    "epochs": self.config.config_fit.local_epochs if hasattr(self.config, 'config_fit') else 1,
+                    "status": status,
+                    "trustScore": None,
+                    "attackType": attack_type if attack_type != "unknown" else None,
+                    "dataPoints": None,
+                    "lastSeen": datetime.utcnow().isoformat() + "Z"
+                }
+                clients_array.append(client_obj)
+            
+            # Build defense metrics (from detector performance)
+            defense_metrics = {}
+            confusion_matrix = {}
+            if perf_results and "error" not in perf_results:
+                defense_metrics = {
+                    "detectionRate": round(perf_results.get("recall", 0.0) * 100, 2),
+                    "falsePositiveRate": round(perf_results.get("false_positive_rate", 0.0) * 100, 2),
+                    "precision": round(perf_results.get("precision", 0.0) * 100, 2),
+                    "recall": round(perf_results.get("recall", 0.0) * 100, 2),
+                    "f1Score": round(perf_results.get("f1_score", 0.0), 2),
+                    "defenseOverhead": None,
+                    "attackImpactReduction": None
+                }
+                
+                confusion_matrix = {
+                    "truePositive": perf_results.get("true_positives", 0),
+                    "falsePositive": perf_results.get("false_positives", 0),
+                    "trueNegative": perf_results.get("true_negatives", 0),
+                    "falseNegative": perf_results.get("false_negatives", 0)
+                }
+            
+            # Build alerts array
+            alerts_array = []
+            if suspicious_clients:
+                for client_id in suspicious_clients:
+                    alert_id = f"alert_r{server_round}_c{client_id}_{int(time.time())}"
+                    alerts_array.append({
+                        "id": alert_id,
+                        "round": server_round,
+                        "clientId": f"client_{client_id}",
+                        "type": "detection",
+                        "severity": "high",
+                        "message": f"Malicious behavior detected from client_{client_id}",
+                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                        "acknowledged": False
+                    })
+            
+            # Calculate round duration
+            round_duration = time.time() - self.round_start_time if self.round_start_time else 0.0
+            
+            # ✅ ALWAYS calculate global metrics by aggregating client local validation metrics
+            # This is the correct approach for federated learning (matching simulation)
+            weighted_accuracy = 0.0
+            weighted_loss = 0.0
+            total_weight = 0
+            
+            for client_id_str, metrics in round_client_metrics.items():
+                # Use equal weight for simplicity (can be improved with actual sample counts)
+                weight = 1
+                weighted_accuracy += metrics.get("local_accuracy", 0.0) * weight
+                weighted_loss += metrics.get("local_loss", 0.0) * weight
+                total_weight += weight
+            
+            global_accuracy = weighted_accuracy / total_weight if total_weight > 0 else 0.0
+            global_loss = weighted_loss / total_weight if total_weight > 0 else 0.0
+            
+            logger.info(f"📊 Round {server_round}: Global metrics (aggregated from {total_weight} clients) - Accuracy: {global_accuracy:.4f}, Loss: {global_loss:.4f}")
+            
+            # Build round data (matching simulation format exactly)
+            round_data = {
+                "metadata": {
+                    "round": server_round,
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "sessionId": self.s3_exporter.session_id if self.s3_exporter else "unknown"
+                },
+                "globalMetrics": {
+                    "accuracy": round(global_accuracy, 4),
+                    "loss": round(global_loss, 4),
+                    "currentRound": server_round,
+                    "totalClients": total_client_count,
+                    "activeMaliciousClients": len(malicious_ground_truth),
+                    "defenseSuccessRate": round(perf_results.get("recall", 0.0) * 100, 2) if perf_results and "error" not in perf_results else 0.0,
+                    "isConnected": True,
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                },
+                "clients": clients_array,
+                "roundSummary": {
+                    "round": server_round,
+                    "accuracy": round(global_accuracy, 4),
+                    "loss": round(global_loss, 4),
+                    "defenseApplied": self.malicious_detector is not None and self.malicious_detector.is_trained,
+                    "maliciousClientsDetected": len(suspicious_clients) if suspicious_clients else 0,
+                    "participatingClients": len(participating_results),
+                    "duration": round(round_duration, 2),
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                },
+                "defenseMetrics": defense_metrics,
+                "confusionMatrix": confusion_matrix,
+                "alerts": alerts_array,
+                "clientHistory": self.client_performance_history
+            }
+            
+            # Upload round data JSON
+            success = self.s3_exporter.upload_round_data(round_data, server_round)
+            
+            if success:
+                logger.info(f"✅ Round {server_round} metrics exported to S3")
+                # Store in round history for final summary (matching simulation)
+                self.round_history.append(round_data)
+            else:
+                logger.warning(f"⚠️  Failed to export round {server_round} metrics to S3")
+            
+            # Track malicious detection alerts
+            if suspicious_clients:
+                alert = {
+                    "round": server_round,
+                    "timestamp": time.time(),
+                    "suspicious_clients": list(suspicious_clients),
+                    "num_suspicious": len(suspicious_clients)
+                }
+                self.cumulative_alerts.append(alert)
+                
+        except Exception as e:
+            logger.error(f"Error exporting round {server_round} metrics to S3: {e}")
+    
+    def _convert_shap_to_csv(self, round_shap_data: Dict) -> List[Dict]:
+        """
+        Convert SHAP data to CSV format.
+        Each row contains: round, client_id, classification, features, SHAP values.
+        
+        Args:
+            round_shap_data: Dictionary from detector's process_round_for_shap_export()
+            
+        Returns:
+            List of dictionaries for CSV export
+        """
+        csv_rows = []
+        
+        try:
+            round_num = round_shap_data['round_num']
+            
+            for client_data in round_shap_data['clients']:
+                row = {
+                    'round': round_num,
+                    'client_id': client_data['client_id'],
+                    'classification': client_data['classification'],
+                    'malicious_probability': client_data['malicious_probability'],
+                }
+                
+                # Add features with 'feature_' prefix
+                for feature_name, feature_value in client_data['features'].items():
+                    row[f'feature_{feature_name}'] = feature_value
+                
+                # Add SHAP values with 'shap_' prefix
+                if 'shap_values' in client_data:
+                    row['shap_base_value'] = client_data['shap_values']['base_value']
+                    
+                    for feature_name, shap_value in client_data['shap_values']['feature_shap_values'].items():
+                        row[f'shap_{feature_name}'] = shap_value
+                
+                csv_rows.append(row)
+            
+            logger.info(f"Converted {len(csv_rows)} client records to CSV format")
+            return csv_rows
+            
+        except Exception as e:
+            logger.error(f"Failed to convert SHAP data to CSV: {e}")
+            return []
+    
+    def upload_final_summary(self) -> bool:
+        """
+        Upload final training summary to S3 (matching simulation structure exactly).
+        Should be called after all rounds complete.
+        
+        Returns:
+            bool: True if upload succeeded
+        """
+        if not self.s3_exporter:
+            logger.warning("S3 exporter not initialized, skipping final summary upload")
+            return False
+        
+        try:
+            from datetime import datetime
+            
+            # Determine attack and detector status
+            attack_enabled = False
+            attack_type = None
+            attack_params = {}
+            malicious_ratio = 0.0
+            
+            if hasattr(self.config, 'attack') and hasattr(self.config.attack, 'enabled'):
+                attack_enabled = self.config.attack.enabled
+                if attack_enabled:
+                    attack_type = self.config.attack.get('attack_type', 'unknown')
+                    attack_params = dict(self.config.attack.get('attack_params', {}))
+                    malicious_ratio = self.config.attack.get('malicious_ratio', 0.0)
+            
+            detector_enabled = self.malicious_detector is not None
+            detector_config = {}
+            if detector_enabled and hasattr(self.config, 'detector'):
+                detector_config = {
+                    "enabled": True,
+                    "model_path": self.config.detector.get('model_path', ''),
+                    "min_rounds_before_detection": self.config.detector.get('min_rounds_before_detection', 2),
+                    "use_simple_model_if_no_pretrained": self.config.detector.get('use_simple_model_if_no_pretrained', False)
+                }
+            
+            # Build config section matching simulation format
+            config_section = {
+                "dataset": {
+                    "type": self.config.dataset.type,
+                    "test_size": self.config.dataset.get('test_size', 0.2),
+                    "seed": self.config.dataset.get('seed', 42),
+                    "data_dir": self.config.dataset.get('data_dir', './data')
+                },
+                "user": self.config.get('user', 'k8s_user'),
+                "num_rounds": self.config.num_rounds,
+                "num_clients": self.config.num_clients,
+                "batch_size": self.config.batch_size,
+                "num_classes": self.config.num_classes,
+                "num_clients_per_round_fit": self.config.server.get('min_fit_clients', self.config.num_clients),
+                "num_clients_per_round_eval": self.config.server.get('min_evaluate_clients', self.config.num_clients),
+                "malicious_detector": detector_config,
+                "config_fit": {
+                    "lr": self.config.config_fit.lr,
+                    "momentum": self.config.config_fit.momentum,
+                    "local_epochs": self.config.config_fit.local_epochs
+                },
+                "attack": {
+                    "enabled": attack_enabled,
+                    "attack_type": attack_type,
+                    "malicious_ratio": malicious_ratio,
+                    "attack_params": attack_params
+                } if attack_enabled else {"enabled": False},
+                "export": {
+                    "enabled": self.config.s3_export.enabled if hasattr(self.config, 's3_export') else False,
+                    "s3_bucket": self.config.s3_export.bucket if hasattr(self.config, 's3_export') else '',
+                    "s3_region": self.config.s3_export.get('region', 'us-east-1') if hasattr(self.config, 's3_export') else 'us-east-1',
+                    "s3_prefix": self.config.s3_export.get('prefix', 'sessions/') if hasattr(self.config, 's3_export') else 'sessions/',
+                    "compress": self.config.s3_export.get('compress', True) if hasattr(self.config, 's3_export') else True,
+                    "validate_schema": self.config.s3_export.get('validate_schema', True) if hasattr(self.config, 's3_export') else True
+                }
+            }
+            
+            # Build final summary matching simulation structure exactly
+            final_summary = {
+                "sessionId": self.s3_exporter.session_id,
+                "config": config_section,
+                "totalRounds": self.config.num_rounds,
+                "totalClients": self.config.num_clients,
+                "attackEnabled": attack_enabled,
+                "detectorEnabled": detector_enabled,
+                "roundHistory": self.round_history,
+                "cumulativeAlerts": self.cumulative_alerts,
+                "trainingCompleted": datetime.utcnow().isoformat() + "Z",
+                "s3Path": self.s3_exporter.get_session_path()
+            }
+            
+            success = self.s3_exporter.upload_final_summary(final_summary)
+            if success:
+                logger.info(f"📤 Final summary uploaded to S3: {self.s3_exporter.get_session_path()}summary.json")
+            else:
+                logger.warning("⚠️  Failed to upload final summary to S3")
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"❌ Error uploading final summary: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
+    
+def create_strategy(config, initial_parameters, testloader=None, malicious_detector=None, s3_exporter=None, shap_calculator=None):
     """
     Create federated learning strategy.
     Works with ANY detector through common interface.
@@ -428,6 +875,8 @@ def create_strategy(config, initial_parameters, testloader=None, malicious_detec
         config=config,
         testloader=testloader,
         malicious_detector=malicious_detector,
+        s3_exporter=s3_exporter,
+        shap_calculator=shap_calculator,
         fraction_fit=config.server.fraction_fit,
         fraction_evaluate=config.server.fraction_evaluate,
         min_fit_clients=config.server.min_fit_clients,
@@ -441,3 +890,48 @@ def create_strategy(config, initial_parameters, testloader=None, malicious_detec
     )
     
     return strategy
+
+
+def _convert_shap_to_csv(self, round_shap_data: Dict) -> List[Dict]:
+    """
+    Convert SHAP data to CSV format.
+    Each row contains: round, client_id, classification, features, SHAP values.
+    
+    Args:
+        round_shap_data: Dictionary from detector's process_round_for_shap_export()
+        
+    Returns:
+        List of dictionaries for CSV export
+    """
+    csv_rows = []
+    
+    try:
+        round_num = round_shap_data['round_num']
+        
+        for client_data in round_shap_data['clients']:
+            row = {
+                'round': round_num,
+                'client_id': client_data['client_id'],
+                'classification': client_data['classification'],
+                'malicious_probability': client_data['malicious_probability'],
+            }
+            
+            # Add features with 'feature_' prefix
+            for feature_name, feature_value in client_data['features'].items():
+                row[f'feature_{feature_name}'] = feature_value
+            
+            # Add SHAP values with 'shap_' prefix
+            if 'shap_values' in client_data:
+                row['shap_base_value'] = client_data['shap_values']['base_value']
+                
+                for feature_name, shap_value in client_data['shap_values']['feature_shap_values'].items():
+                    row[f'shap_{feature_name}'] = shap_value
+            
+            csv_rows.append(row)
+        
+        logger.info(f"Converted {len(csv_rows)} client records to CSV format")
+        return csv_rows
+        
+    except Exception as e:
+        logger.error(f"Failed to convert SHAP data to CSV: {e}")
+        return []

@@ -11,6 +11,11 @@ import os
 import shutil
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.feature_selection import SelectKBest, f_classif
+from torch.utils.data import DataLoader, Subset
+from torchvision.datasets import MNIST, FashionMNIST
+from typing import List, Optional
+import pickle
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +145,100 @@ def load_and_preprocess_5gnidd(dataset_path, dataset_files, max_samples_per_clas
         logger.error(f"Error in load_and_preprocess_5gnidd: {e}", exc_info=True)
         return None, None, None
 
+def create_non_iid_partitions(dataset_size: int, num_partitions: int, skew_ratio: float = 3.0, seed: int = 123) -> List[int]:
+    """
+    Create Non-IID partition sizes with quantity skew.
+    
+    Args:
+        dataset_size: Total number of samples in the dataset
+        num_partitions: Number of clients
+        skew_ratio: Controls the level of imbalance (higher = more imbalance)
+                   Typical values: 1.0 (mild), 3.0 (moderate), 5.0+ (severe)
+        seed: Random seed for reproducibility
+    
+    Returns:
+        List of partition sizes for each client
+    """
+    rng = np.random.RandomState(seed)
+    
+    # Generate random proportions using exponential distribution
+    proportions = rng.exponential(scale=skew_ratio, size=num_partitions)
+    
+    # Normalize proportions to sum to 1
+    proportions = proportions / proportions.sum()
+    
+    # Convert to actual sample counts
+    partition_sizes = (proportions * dataset_size).astype(int)
+    
+    # Ensure each client has at least 2 samples
+    min_samples = 2
+    for i in range(len(partition_sizes)):
+        if partition_sizes[i] < min_samples:
+            partition_sizes[i] = min_samples
+    
+    # Adjust last partition to use all remaining samples
+    partition_sizes[-1] = dataset_size - partition_sizes[:-1].sum()
+    
+    # If last partition is negative or too small, redistribute
+    if partition_sizes[-1] < min_samples:
+        partition_sizes = np.full(num_partitions, dataset_size // num_partitions)
+        partition_sizes[-1] = dataset_size - partition_sizes[:-1].sum()
+    
+    return partition_sizes.tolist()
+
+def create_label_skew_partitions(targets: np.ndarray, num_partitions: int, num_classes: int, alpha: float = 0.5, seed: int = 123) -> List[List[int]]:
+    """
+    Create Non-IID partitions with label distribution skew using Dirichlet distribution.
+    
+    Args:
+        targets: Array of labels
+        num_partitions: Number of clients
+        num_classes: Number of classes in the dataset
+        alpha: Dirichlet concentration parameter
+               - Small alpha (0.1-0.5): High skew, clients see few classes
+               - Medium alpha (1.0): Moderate skew
+               - Large alpha (10+): Low skew, closer to IID
+        seed: Random seed for reproducibility
+    
+    Returns:
+        List of lists, where each inner list contains indices for one client
+    """
+    rng = np.random.RandomState(seed)
+    
+    # Create index lists for each class
+    class_indices = [np.where(targets == i)[0] for i in range(num_classes)]
+    
+    # Initialize client partitions
+    client_indices = [[] for _ in range(num_partitions)]
+    
+    # For each class, use Dirichlet to split samples among clients
+    for class_idx in range(num_classes):
+        indices = class_indices[class_idx]
+        rng.shuffle(indices)
+        
+        # Sample proportions from Dirichlet distribution
+        proportions = rng.dirichlet(alpha=np.repeat(alpha, num_partitions))
+        
+        # Split indices according to proportions
+        split_points = (np.cumsum(proportions) * len(indices)).astype(int)[:-1]
+        split_indices = np.split(indices, split_points)
+        
+        # Assign to clients
+        for client_id, client_class_indices in enumerate(split_indices):
+            client_indices[client_id].extend(client_class_indices.tolist())
+    
+    # Shuffle each client's indices
+    for client_id in range(num_partitions):
+        rng.shuffle(client_indices[client_id])
+    
+    # Ensure each client has at least 2 samples
+    min_samples = 2
+    for client_id in range(num_partitions):
+        if len(client_indices[client_id]) < min_samples:
+            logger.warning(f"Client {client_id} has only {len(client_indices[client_id])} samples")
+    
+    return client_indices
+
 def get_client_dataset(client_id: int, config):
     """Get dataset partition for a specific client"""
     
@@ -183,7 +282,6 @@ def get_client_dataset(client_id: int, config):
         if use_cache and os.path.exists(cache_path):
             logger.info(f"Loading preprocessed data from cache: {cache_path}")
             try:
-                import pickle
                 with open(cache_path, 'rb') as f:
                     cached = pickle.load(f)
                 X = cached['X']
@@ -235,33 +333,136 @@ def get_client_dataset(client_id: int, config):
     else:
         raise ValueError(f"Unsupported dataset: {config.dataset.type}")
     
-    # Partition dataset for this client using IID (random_split with fixed seed)
+    # Get distribution configuration
     num_clients = config.num_clients
-    partition_size = len(trainset) // num_clients
-    remainder = len(trainset) % num_clients
-    
-    # Create partition lengths
-    partition_lengths = [partition_size] * num_clients
-    partition_lengths[-1] += remainder
+    distribution_config = config.dataset.get('distribution', {})
+    distribution_type = distribution_config.get('type', 'iid')
+    partition_seed = distribution_config.get('partition_seed', 123)
     
     logger.info(f"Total samples: {len(trainset)}, Clients: {num_clients}")
-    logger.info(f"Partition lengths: {partition_lengths}")
+    logger.info(f"Distribution type: {distribution_type}")
     
-    # Use random_split with fixed seed for reproducible IID partitioning
-    all_partitions = torch.utils.data.random_split(
-        trainset, 
-        partition_lengths,
-        generator=torch.Generator().manual_seed(123)
-    )
+    # Create partitions based on distribution type
+    if distribution_type == "label_skew":
+        # Label Distribution Skew (Dirichlet)
+        alpha = distribution_config.get('alpha', 0.5)
+        num_classes = config.num_classes
+        
+        logger.info(f"Using Label Skew distribution (Dirichlet alpha={alpha}, {num_classes} classes)")
+        
+        # Extract targets from dataset
+        if hasattr(trainset, 'targets'):
+            targets = np.array(trainset.targets if isinstance(trainset.targets, list) else trainset.targets)
+        elif hasattr(trainset, 'dataset') and hasattr(trainset.dataset, 'targets'):
+            # Handle Subset
+            targets = np.array(trainset.dataset.targets)
+            if hasattr(trainset, 'indices'):
+                targets = targets[trainset.indices]
+        else:
+            # For custom datasets, iterate and collect labels
+            logger.info("Extracting labels from dataset...")
+            targets = []
+            for i in range(len(trainset)):
+                sample = trainset[i]
+                if isinstance(sample, dict):
+                    label = sample['label'].item() if torch.is_tensor(sample['label']) else sample['label']
+                else:
+                    label = sample[1].item() if torch.is_tensor(sample[1]) else sample[1]
+                targets.append(label)
+            targets = np.array(targets)
+        
+        # Get indices for all clients
+        client_indices_all = create_label_skew_partitions(
+            targets=targets,
+            num_partitions=num_clients,
+            num_classes=num_classes,
+            alpha=alpha,
+            seed=partition_seed
+        )
+        
+        # Get this client's indices
+        effective_client_id = client_id % num_clients
+        client_indices = client_indices_all[effective_client_id]
+        partition_lengths = [len(indices) for indices in client_indices_all]
+        
+        logger.info(f"Partition lengths: {partition_lengths}")
+        logger.info(f"Client {client_id} (effective: {effective_client_id}) dataset size: {len(client_indices)}")
+        
+        # Create subset for this client
+        client_trainset = Subset(trainset, client_indices)
+        
+        # Log label distribution for this client
+        client_labels = targets[client_indices]
+        label_counts = np.bincount(client_labels, minlength=num_classes)
+        label_dist = label_counts / label_counts.sum() if label_counts.sum() > 0 else label_counts
+        
+        logger.info(f"📊 Client {client_id} Data Distribution:")
+        logger.info(f"   Total samples: {len(client_indices)}")
+        logger.info(f"   Number of classes: {num_classes}")
+        logger.info(f"   Class distribution: {dict(enumerate(label_counts))}")
+        logger.info(f"   Class percentages: {dict(enumerate([f'{p*100:.1f}%' for p in label_dist]))}")
+        
+        # Check for class imbalance
+        if label_counts.max() > 0:
+            imbalance_ratio = label_counts.max() / (label_counts[label_counts > 0].min() if any(label_counts > 0) else 1)
+            if imbalance_ratio > 2.0:
+                logger.warning(f"   ⚠️  Class imbalance detected! Ratio: {imbalance_ratio:.2f}:1")
     
-    # Get this client's partition
-    effective_client_id = client_id % num_clients
-    client_trainset = all_partitions[effective_client_id]
+    elif distribution_type == "non_iid":
+        # Quantity Skew (uneven data amounts)
+        skew_ratio = distribution_config.get('quantity_skew_ratio', 3.0)
+        
+        logger.info(f"Using Non-IID distribution with quantity skew (ratio={skew_ratio})")
+        
+        partition_lengths = create_non_iid_partitions(
+            dataset_size=len(trainset),
+            num_partitions=num_clients,
+            skew_ratio=skew_ratio,
+            seed=partition_seed
+        )
+        
+        # Calculate start and end indices for this client
+        effective_client_id = client_id % num_clients
+        start_idx = sum(partition_lengths[:effective_client_id])
+        end_idx = start_idx + partition_lengths[effective_client_id]
+        client_indices = list(range(start_idx, end_idx))
+        
+        logger.info(f"Partition lengths: {partition_lengths}")
+        logger.info(f"Client {client_id} (effective: {effective_client_id}) dataset size: {len(client_indices)}")
+        
+        # Create subset for this client
+        client_trainset = Subset(trainset, client_indices)
+        
+        # Log distribution
+        _log_client_data_distribution(client_id, client_trainset, config.dataset.type)
     
-    logger.info(f"Client {client_id} (effective: {effective_client_id}) dataset size: {len(client_trainset)}")
-    
-    # ✅ ADD: Analyze class distribution for this client
-    _log_client_data_distribution(client_id, client_trainset, config.dataset.type)
+    else:
+        # IID: equal partition sizes
+        logger.info("Using IID distribution (equal partition sizes)")
+        
+        partition_size = len(trainset) // num_clients
+        remainder = len(trainset) % num_clients
+        
+        partition_lengths = [partition_size] * num_clients
+        partition_lengths[-1] += remainder
+        
+        logger.info(f"Partition lengths: {partition_lengths}")
+        
+        # Use random_split with fixed seed for reproducible IID partitioning
+        all_partitions = torch.utils.data.random_split(
+            trainset, 
+            partition_lengths,
+            generator=torch.Generator().manual_seed(partition_seed)
+        )
+        
+        # Get this client's partition
+        effective_client_id = client_id % num_clients
+        client_trainset = all_partitions[effective_client_id]
+        
+        logger.info(f"Client {client_id} (effective: {effective_client_id}) dataset size: {len(client_trainset)}")
+        
+        # Log distribution
+        _log_client_data_distribution(client_id, client_trainset, config.dataset.type)
     
     if len(client_trainset) == 0:
         raise ValueError(f"Client {client_id} has empty dataset! Check partitioning logic.")
@@ -359,93 +560,78 @@ def _log_client_data_distribution(client_id: int, dataset, dataset_type: str):
         logger.error(traceback.format_exc())
 
 def prepare_server_dataset(config):
-    """Prepare test dataset for server evaluation"""
+    """Load test dataset for server evaluation"""
     
-    if config.dataset.type == "mnist":
+    dataset_type = config.dataset.type
+    
+    if dataset_type == "mnist":
         transform = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize((0.1307,), (0.3081,))
         ])
-        testset = torchvision.datasets.MNIST(
-            root='./data', train=False, download=True, transform=transform
-        )
-    
-    elif config.dataset.type == "fashion_mnist":
-        # Fashion-MNIST test dataset
+        testset = MNIST(root=config.dataset.data_dir, train=False, download=True, transform=transform)
+        
+    elif dataset_type == "fashion_mnist":
         transform = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize((0.2860,), (0.3530,))  # Fashion-MNIST mean/std
+            transforms.Normalize((0.2860,), (0.3530,))
         ])
-        testset = torchvision.datasets.FashionMNIST(
-            root='./data', train=False, download=True, transform=transform
-        )
-    
-    elif config.dataset.type == "iris":
-        iris = load_iris()
-        X_train, X_test, y_train, y_test = train_test_split(
-            iris.data, iris.target, test_size=0.2, random_state=42
-        )
-        X_test_tensor = torch.FloatTensor(X_test)
-        y_test_tensor = torch.LongTensor(y_test)
-        testset = torch.utils.data.TensorDataset(X_test_tensor, y_test_tensor)
-    
-    elif config.dataset.type == "5gnidd":
+        testset = FashionMNIST(root=config.dataset.data_dir, train=False, download=True, transform=transform)
+        
+    elif dataset_type == "5gnidd":
         logger.info("Loading 5G-NIDD test dataset...")
+        cached_data_path = os.getenv('CACHED_DATA_PATH', '/shared-data/preprocessed_data.pkl')
         
-        # Check for cached preprocessed data first
-        use_cache = os.environ.get('USE_CACHED_DATA', 'false').lower() == 'true'
-        cache_path = os.environ.get('CACHED_DATA_PATH', '/shared-data/preprocessed_data.pkl')
-        
-        if use_cache and os.path.exists(cache_path):
-            logger.info(f"Loading preprocessed data from cache: {cache_path}")
-            try:
-                import pickle
-                with open(cache_path, 'rb') as f:
-                    cached = pickle.load(f)
-                X = cached['X']
-                y = cached['y']
-                logger.info(f"Loaded cached data: X shape {X.shape}, y shape {y.shape}")
-            except Exception as e:
-                logger.warning(f"Failed to load cached data: {e}")
-                logger.info("Falling back to download and preprocess...")
-                use_cache = False
+        if os.path.exists(cached_data_path):
+            logger.info(f"Loading preprocessed data from cache: {cached_data_path}")
+            with open(cached_data_path, 'rb') as f:
+                data = pickle.load(f)
+            
+            # Check the structure of cached data
+            logger.info(f"Cached data keys: {list(data.keys())}")
+            
+            # Handle different cache file formats
+            if 'X_test' in data and 'y_test' in data:
+                X_test = data['X_test']
+                y_test = data['y_test']
+            elif 'test_data' in data:
+                X_test = data['test_data']
+                y_test = data['test_labels']
+            else:
+                # Assume it's the full dataset, split it
+                X = data['X']
+                y = data['y']
+                scaler = data['scaler']
+                
+                # Use the same split ratio as client loading
+                test_size = 0.2
+                from sklearn.model_selection import train_test_split
+                _, X_test, _, y_test = train_test_split(
+                    X, y, test_size=test_size, random_state=42, stratify=y
+                )
+            
+            logger.info(f"Loaded cached data: X shape {X_test.shape}, y shape {y_test.shape}")
+            
+            class NIDDDataset(torch.utils.data.Dataset):
+                def __init__(self, X, y):
+                    self.X = torch.FloatTensor(X)
+                    self.y = torch.LongTensor(y)
+                
+                def __getitem__(self, idx):
+                    return {"features": self.X[idx], "label": self.y[idx]}
+                
+                def __len__(self):
+                    return len(self.X)
+            
+            testset = NIDDDataset(X_test, y_test)
         else:
-            if use_cache:
-                logger.warning(f"Cache enabled but file not found: {cache_path}")
-            use_cache = False
-        
-        if not use_cache:
-            # Download dataset
-            data_path = config.dataset.get('data_dir', './data')
-            dataset_path, dataset_files = download_5gnidd_dataset(data_path)
-            
-            if dataset_path is None:
-                raise ValueError("Failed to download 5G-NIDD dataset")
-            
-            # Load and preprocess
-            X, y, scaler = load_and_preprocess_5gnidd(dataset_path, dataset_files)
-            
-            if X is None:
-                raise ValueError("Failed to preprocess 5G-NIDD dataset")
-        
-        # Split into train/test
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=config.dataset.get('test_size', 0.2), 
-            random_state=config.dataset.get('seed', 42)
-        )
-        
-        # Convert to tensors
-        X_test_tensor = torch.FloatTensor(X_test)
-        y_test_tensor = torch.LongTensor(y_test)
-        testset = torch.utils.data.TensorDataset(X_test_tensor, y_test_tensor)
-        
-        logger.info(f"5G-NIDD test dataset loaded: {len(testset)} samples")
+            raise FileNotFoundError(f"Cached data not found at {cached_data_path}")
     
     else:
-        raise ValueError(f"Unsupported dataset: {config.dataset.type}")
+        raise ValueError(f"Unsupported dataset type: {dataset_type}")
     
-    testloader = torch.utils.data.DataLoader(
-        testset, batch_size=config.batch_size
-    )
+    logger.info(f"5G-NIDD test dataset loaded: {len(testset)} samples")
+    
+    testloader = DataLoader(testset, batch_size=config.batch_size, shuffle=False, num_workers=2)
     
     return testloader

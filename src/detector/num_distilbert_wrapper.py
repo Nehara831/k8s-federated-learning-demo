@@ -6,6 +6,7 @@ Adapts the pointwise detector API to match MaliciousClientDetector interface.
 import logging
 from pathlib import Path
 from collections import defaultdict
+from typing import List, Dict, Any
 import numpy as np
 import torch
 import json
@@ -37,7 +38,6 @@ class NumDistilBERTWrapper:
         self.model_config = model_config
         self.reference_model = reference_model
         
-        # Extract layer names from reference model for parameter mapping
         self.layer_names = None
         if reference_model is not None:
             self._extract_layer_names_from_model(reference_model)
@@ -79,8 +79,11 @@ class NumDistilBERTWrapper:
         
         # Storage for current round detections
         self.current_round_malicious = []
-        self.current_round_predictions = {}  # {client_id: (prediction, probability)}
+        self.round_predictions = {}  # {round_num: {client_id: (prediction, probability)}}
         self.malicious_history = {}  # {round: [client_ids]}
+        
+        # ✅ Store ground truth labels per round
+        self.ground_truth_labels = {}  # {round_num: {client_id: is_malicious}}
         
         # Feature storage for debugging
         self.client_features = defaultdict(dict)  # {round: {client_id: features}}
@@ -125,27 +128,21 @@ class NumDistilBERTWrapper:
         
         param_dict = {}
         
-        # Get expected parameter names from the model
         if self.layer_names and len(param_list) > 0:
-            # Flower sends ALL state_dict items in the same order as model.state_dict().items()
-            # This includes weights, biases, AND BatchNorm buffers
+            
             expected_param_count = len(self.layer_names)
             
             if len(param_list) == expected_param_count:
-                # Perfect match - use actual layer names
                 for name, param in zip(self.layer_names, param_list):
                     param_dict[name] = param
                 logger.debug(f"✅ Mapped {len(param_list)} parameters using model layer names")
                 
             else:
-                # Mismatch detected - need to handle this carefully
                 logger.warning(
                     f"⚠️  Parameter count mismatch: {len(param_list)} params vs "
                     f"{expected_param_count} expected layer names"
                 )
                 
-                # CRITICAL FIX: Re-extract layer names to include ALL state_dict keys
-                # including BatchNorm buffers
                 if self.reference_model is not None:
                     all_keys = list(self.reference_model.state_dict().keys())
                     
@@ -155,12 +152,10 @@ class NumDistilBERTWrapper:
                         logger.info(f"✅ Mapped using complete state_dict keys (including BatchNorm)")
                         return param_dict
                 
-                # Fallback: use generic names
                 for i, param in enumerate(param_list):
                     param_dict[f'layer_{i}'] = param
                 logger.warning("⚠️  Using generic layer names - feature extraction may be incomplete")
         else:
-            # No layer names available
             for i, param in enumerate(param_list):
                 param_dict[f'layer_{i}'] = param
             logger.info("Using generic layer names (no reference model)")
@@ -176,10 +171,13 @@ class NumDistilBERTWrapper:
         """
         self.current_round = round_num
         self.current_round_malicious = []
-        self.current_round_predictions = {}
+        if round_num not in self.round_predictions:
+            self.round_predictions[round_num] = {}
+        if round_num not in self.ground_truth_labels:
+            self.ground_truth_labels[round_num] = {}
         logger.info(f"🔄 Round {round_num}: Started new round detection")
     
-    def update_client_behavior(self, client_id, round_num, current_round_params, prev_round_params):
+    def update_client_behavior(self, client_id, round_num, current_round_params, prev_round_params, is_malicious=False):
         """
         Extract features and detect if client is malicious.
         
@@ -188,37 +186,34 @@ class NumDistilBERTWrapper:
             round_num: Current round number
             current_round_params: Client's model parameters (list of numpy arrays)
             prev_round_params: Previous round's global model parameters
+            is_malicious: Ground truth label (True if client is malicious)
         
         Returns:
             prediction: 0 (benign) or 1 (malicious)
         """
-        if not self.is_trained:
-            logger.warning(f"Detector not trained - skipping client {client_id}")
-            return 0
-        
         try:
-            # DEBUG: Log incoming parameter structure
+            if round_num not in self.ground_truth_labels:
+                self.ground_truth_labels[round_num] = {}
+            self.ground_truth_labels[round_num][client_id] = 1 if is_malicious else 0
+            
             logger.info(f"📋 Client {client_id} Round {round_num} - Parameter Analysis:")
             logger.info(f"   Current params type: {type(current_round_params)}")
             logger.info(f"   Prev params type: {type(prev_round_params)}")
+            logger.info(f"   Ground truth: {'MALICIOUS' if is_malicious else 'BENIGN'}")
             
             if isinstance(current_round_params, list):
                 logger.info(f"   Current params count: {len(current_round_params)}")
                 logger.info(f"   Sample shapes: {[p.shape for p in current_round_params[:3]]}")
             
-            # Convert parameters using proper layer name mapping
             param_dict = self._convert_params_to_dict(current_round_params)
             ref_param_dict = self._convert_params_to_dict(prev_round_params)
             
-            # DEBUG: Log conversion results
             logger.info(f"   ✅ Converted to dict with {len(param_dict)} keys")
             if ref_param_dict:
                 logger.info(f"   ✅ Reference dict has {len(ref_param_dict)} keys")
             
-            # DEBUG: Log dictionary structure before feature extraction
             logger.info(f"   📊 Parameter dict keys: {list(param_dict.keys())[:5]}... (showing first 5)")
             
-            # Extract features from client's model update
             features = extract_model_features(
                 param_dict,
                 client_id,
@@ -226,22 +221,24 @@ class NumDistilBERTWrapper:
                 reference_params=ref_param_dict
             )
             
-            # DEBUG: Log extracted features
             logger.info(f"   ✅ Extracted {len(features)} features from client {client_id}")
             
-            # Store features for debugging
             if round_num not in self.client_features:
                 self.client_features[round_num] = {}
             self.client_features[round_num][client_id] = features
             
-            # Predict using Num-DistilBERT (features is already a dict)
-            prediction, probability = self.detector.predict(features, threshold=self.threshold)
+            if not self.is_trained:
+                logger.warning(f"Detector not trained - using default prediction for client {client_id}")
+                prediction, probability = 0, 0.0  # Default: benign with 0 confidence
+            else:
+                prediction, probability = self.detector.predict(features, threshold=self.threshold)
             
-            # Store prediction
-            self.current_round_predictions[client_id] = (prediction, probability)
+            if round_num not in self.round_predictions:
+                self.round_predictions[round_num] = {}
+            self.round_predictions[round_num][client_id] = (prediction, probability)
             
-            # Add to malicious list if detected
-            if prediction == 1:
+            # Add to malicious list if detected (only if detector is trained)
+            if self.is_trained and prediction == 1:
                 self.current_round_malicious.append(client_id)
                 logger.warning(
                     f"🚨 Round {round_num}: Client {client_id} detected as MALICIOUS "
@@ -250,7 +247,7 @@ class NumDistilBERTWrapper:
             else:
                 logger.info(
                     f"✅ Round {round_num}: Client {client_id} classified as BENIGN "
-                    f"(probability: {probability:.4f})"
+                    f"(probability: {probability:.4f}, trained: {self.is_trained})"
                 )
             
             return prediction
@@ -308,14 +305,14 @@ class NumDistilBERTWrapper:
         metrics_with_meta['num_detected'] = len(self.current_round_malicious)
         metrics_with_meta['detected_clients'] = self.current_round_malicious
         
-        # Add prediction details (probabilities)
-        if self.current_round_predictions:
+        # Add prediction details (probabilities) for this specific round
+        if round_num in self.round_predictions:
             metrics_with_meta['predictions'] = {
                 str(cid): {
                     'prediction': int(pred),
                     'probability': float(prob)
                 }
-                for cid, (pred, prob) in self.current_round_predictions.items()
+                for cid, (pred, prob) in self.round_predictions[round_num].items()
             }
         
         # Store in history
@@ -397,3 +394,250 @@ class NumDistilBERTWrapper:
             
         except Exception as e:
             logger.error(f"Failed to save final report: {e}")
+    
+    def process_round_for_shap_export(self, round_num):
+        """
+        Process and export round data with SHAP values.
+        This method extracts features, computes SHAP values, and structures data for S3 export.
+        
+        Args:
+            round_num: Current round number
+            
+        Returns:
+            Dictionary with round data including client features and SHAP values
+        """
+        try:
+            # Get all client data from this round
+            round_clients = []
+            
+            # Get predictions for this specific round
+            if round_num not in self.round_predictions:
+                logger.warning(f"No predictions found for round {round_num}")
+                return {
+                    'round_num': round_num,
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'num_samples': 0,
+                    'clients': []
+                }
+            
+            round_predictions = self.round_predictions[round_num]
+            logger.info(f"📊 Processing {len(round_predictions)} clients for round {round_num} SHAP export")
+            
+            for client_id, (prediction, probability) in round_predictions.items():
+                # Get features for this client
+                if round_num not in self.client_features or client_id not in self.client_features[round_num]:
+                    logger.warning(f"No features found for client {client_id} in round {round_num}")
+                    continue
+                
+                features = self.client_features[round_num][client_id]
+                
+                # Get classification
+                classification = "malicious" if prediction == 1 else "benign"
+                
+                # Prepare client data
+                client_data = {
+                    'client_id': int(client_id),
+                    'round_num': round_num,
+                    'classification': classification,
+                    'malicious_probability': float(probability),
+                    'features': {k: float(v) if isinstance(v, (int, float, np.number)) else v 
+                               for k, v in features.items()}
+                }
+                
+                # Add SHAP values (using feature values as importance proxy)
+                # For Num-DistilBERT, we use the trained model's feature embeddings as SHAP proxy
+                shap_values = self._compute_feature_importance(features)
+                client_data['shap_values'] = shap_values
+                
+                round_clients.append(client_data)
+            
+            # Build export data structure
+            round_export_data = {
+                'round_num': round_num,
+                'timestamp': datetime.utcnow().isoformat(),
+                'num_samples': len(round_clients),
+                'clients': round_clients
+            }
+            
+            logger.info(f"✅ Processed round {round_num} with {len(round_clients)} clients for SHAP export")
+            return round_export_data
+            
+        except Exception as e:
+            logger.error(f"Failed to process round {round_num} for SHAP export: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return None
+
+    def _compute_feature_importance(self, features):
+        """
+        Compute feature importance using the detector's attention mechanism.
+        This serves as a proxy for SHAP values specific to Num-DistilBERT.
+        
+        Args:
+            features: Dictionary of client features
+            
+        Returns:
+            Dictionary with SHAP-like importance scores
+        """
+        try:
+            if not self.is_trained:
+                # Fallback: use absolute feature values as importance
+                return {
+                    'base_value': 0.0,
+                    'feature_shap_values': {
+                        k: float(abs(v)) if isinstance(v, (int, float, np.number)) else 0.0
+                        for k, v in features.items()
+                    }
+                }
+            
+            # Convert features to model input
+            feature_array = np.array([
+                features.get(name, 0.0) for name in self.detector.feature_names
+            ])
+            
+            # Scale if scaler is available
+            if self.detector.scaler:
+                feature_array = self.detector.scaler.transform([feature_array])[0]
+            
+            # Get model's feature embeddings (attention weights as importance)
+            x = torch.FloatTensor(feature_array).unsqueeze(0)
+            
+            with torch.no_grad():
+                # Get feature embeddings
+                feature_embeds = self.detector.model.input_embedding(x)
+                
+                # Use embedding magnitudes as feature importance
+                importance = torch.norm(feature_embeds, dim=-1).squeeze().numpy()
+            
+            # Normalize importance scores
+            importance = importance / (importance.sum() + 1e-10)
+            
+            # Map to feature names
+            shap_values = {
+                'base_value': 0.5,  # Neutral baseline
+                'feature_shap_values': {
+                    name: float(imp) 
+                    for name, imp in zip(self.detector.feature_names, importance)
+                }
+            }
+            
+            return shap_values
+            
+        except Exception as e:
+            logger.error(f"Failed to compute feature importance: {e}")
+            # Fallback
+            return {
+                'base_value': 0.0,
+                'feature_shap_values': {
+                    k: float(abs(v)) if isinstance(v, (int, float, np.number)) else 0.0
+                    for k, v in features.items()
+                }
+            }
+    
+    def process_round_for_csv_export(self, round_num: int, main_task_accuracy: float = 0.0, 
+                                     main_task_loss: float = 0.0) -> List[Dict]:
+        """
+        Process round data for CSV export (matching simulation format).
+        Creates one row per client with features + SHAP values.
+        
+        Args:
+            round_num: Current round number
+            main_task_accuracy: Main task accuracy for this round
+            main_task_loss: Main task loss for this round
+            
+        Returns:
+            List of dictionaries (CSV rows), one per client
+        """
+        try:
+            # Check if we have predictions for this round
+            if round_num not in self.round_predictions:
+                logger.warning(f"No predictions found for round {round_num}")
+                return []
+            
+            round_predictions = self.round_predictions[round_num]
+            logger.info(f"📊 Processing {len(round_predictions)} clients for round {round_num} CSV export")
+            
+            csv_rows = []
+            
+            for client_id, (prediction, probability) in round_predictions.items():
+                # Get features for this client
+                if round_num not in self.client_features or client_id not in self.client_features[round_num]:
+                    logger.warning(f"No features found for client {client_id} in round {round_num}")
+                    continue
+                
+                features = self.client_features[round_num][client_id]
+                
+                # Compute SHAP values
+                shap_values = self._compute_feature_importance(features)
+                
+                # Build CSV row (matching simulation format exactly)
+                row = {
+                    'client_id': client_id,
+                    'round_num': round_num,
+                    # Feature values
+                    'param_mean': features.get('param_mean', 0.0),
+                    'param_std': features.get('param_std', 0.0),
+                    'param_min': features.get('param_min', 0.0),
+                    'param_max': features.get('param_max', 0.0),
+                    'param_median': features.get('param_median', 0.0),
+                    'param_range': features.get('param_range', 0.0),
+                    'param_abs_mean': features.get('param_abs_mean', 0.0),
+                    'param_skew': features.get('param_skew', 0.0),
+                    'param_kurtosis': features.get('param_kurtosis', 0.0),
+                    'param_neg_ratio': features.get('param_neg_ratio', 0.0),
+                    'param_zero_ratio': features.get('param_zero_ratio', 0.0),
+                    'last_layer_mean': features.get('last_layer_mean', 0.0),
+                    'last_layer_std': features.get('last_layer_std', 0.0),
+                    'last_layer_min': features.get('last_layer_min', 0.0),
+                    'last_layer_max': features.get('last_layer_max', 0.0),
+                    'last_layer_abs_mean': features.get('last_layer_abs_mean', 0.0),
+                    'last_layer_neg_ratio': features.get('last_layer_neg_ratio', 0.0),
+                    'first_vs_last_mean_ratio': features.get('first_vs_last_mean_ratio', 0.0),
+                    'first_vs_last_std_ratio': features.get('first_vs_last_std_ratio', 0.0),
+                    'avg_l1_distance': features.get('avg_l1_distance', 0.0),
+                    'avg_l2_distance': features.get('avg_l2_distance', 0.0),
+                    'cosine_similarity': features.get('cosine_similarity', 0.0),
+                    # Detection results
+                    'true_label': self.ground_truth_labels.get(round_num, {}).get(client_id, 0),  # ✅ Ground truth from client
+                    'predicted_label': prediction,
+                    'predicted_prob': probability,
+                    # Main task metrics
+                    'main_task_accuracy': main_task_accuracy,
+                    'main_task_loss': main_task_loss,
+                }
+                
+                # Add SHAP values with exact naming from simulation
+                feature_shap = shap_values.get('feature_shap_values', {})
+                row['SHAP_Param Mean'] = feature_shap.get('param_mean', 0.0)
+                row['SHAP_Param Std'] = feature_shap.get('param_std', 0.0)
+                row['SHAP_Param Min'] = feature_shap.get('param_min', 0.0)
+                row['SHAP_Param Max'] = feature_shap.get('param_max', 0.0)
+                row['SHAP_Param Median'] = feature_shap.get('param_median', 0.0)
+                row['SHAP_Param Range'] = feature_shap.get('param_range', 0.0)
+                row['SHAP_Param Absolute Mean'] = feature_shap.get('param_abs_mean', 0.0)
+                row['SHAP_Param Skew'] = feature_shap.get('param_skew', 0.0)
+                row['SHAP_Param Kurtosis'] = feature_shap.get('param_kurtosis', 0.0)
+                row['SHAP_Param Negative Ratio'] = feature_shap.get('param_neg_ratio', 0.0)
+                row['SHAP_Param Zero Ratio'] = feature_shap.get('param_zero_ratio', 0.0)
+                row['SHAP_Last Layer Mean'] = feature_shap.get('last_layer_mean', 0.0)
+                row['SHAP_Last Layer Std'] = feature_shap.get('last_layer_std', 0.0)
+                row['SHAP_Last Layer Min'] = feature_shap.get('last_layer_min', 0.0)
+                row['SHAP_Last Layer Max'] = feature_shap.get('last_layer_max', 0.0)
+                row['SHAP_Last Layer Absolute Mean'] = feature_shap.get('last_layer_abs_mean', 0.0)
+                row['SHAP_Last Layer Negative Ratio'] = feature_shap.get('last_layer_neg_ratio', 0.0)
+                row['SHAP_First vs Last Mean Ratio'] = feature_shap.get('first_vs_last_mean_ratio', 0.0)
+                row['SHAP_First vs Last Std Ratio'] = feature_shap.get('first_vs_last_std_ratio', 0.0)
+                row['SHAP_Avg L1 Distance'] = feature_shap.get('avg_l1_distance', 0.0)
+                row['SHAP_Avg L2 Distance'] = feature_shap.get('avg_l2_distance', 0.0)
+                row['SHAP_Cosine Similarity'] = feature_shap.get('cosine_similarity', 0.0)
+                
+                csv_rows.append(row)
+            
+            logger.info(f"✅ Converted {len(csv_rows)} client records to CSV format for round {round_num}")
+            return csv_rows
+            
+        except Exception as e:
+            logger.error(f"Failed to process round {round_num} for CSV export: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return []

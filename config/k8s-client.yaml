@@ -7,6 +7,13 @@ dataset:
   test_size: 0.2
   seed: 42
   data_dir: "/app/data"
+  num_classes: 9
+  
+  distribution:
+    type: "iid"  # Options: 'iid', 'non_iid', 'label_skew'
+    quantity_skew_ratio: 3.0
+    alpha: 0.1
+    partition_seed: 123
 
 num_clients: 10
 num_classes: 9
@@ -14,38 +21,27 @@ batch_size: 8
 
 attack:
   enabled: true
-  attack_type: "poisoned_fl"  # Options: model_poisoning, poisoned_fl, label_flip, backdoor
+  attack_type: "model_poisoning"  # Options: model_poisoning, poisoned_fl, label_flip, backdoor
   malicious_ratio: 0.4  
   attack_params:
-    attack_start_round: 3
-    attack_probability: 1.0
+    attack_start_round: 1
+    attack_probability: 0.6
     poison_global_model: true
     
-    # For model_poisoning attack
     poisoning_method: "constant_noise"  # Options: constant_noise, scale, invert, gaussian, zero
-    target_layers: "all"  # Options: all, first, last, or [0, 2, 4]
+    target_layers: "all"  
     layer_specific_factor: 1.0
     
-    noise_factor: 0.5
-    gaussian_mean: 0.0
-    gaussian_std: 1.0
-    
+
     scale:
       scale_factor: 1.4
     
     constant_noise:
       constant_noise_value: 1.8
     
-    label_flip:
-      flip_strategy: "targeted"  # Options: targeted, random, class_confusion
-      flip_ratio: 0.5
-      target_label: 0
-      source_label: null
-      num_classes: 9
-    
         
     poisoned_fl:
-      sign_vector_seed: 42  # CRITICAL: Must be same for all malicious clients
+      sign_vector_seed: 42  
       initial_lambda: 8.0
       lambda_increase_factor: 1.0
       lambda_decrease_factor: 0.7
@@ -57,4 +53,4 @@ attack:
 config_fit:
   lr: 0.01
   momentum: 0.9
-  local_epochs: 5
+  local_epochs: 1

@@ -5,8 +5,7 @@ metadata:
   namespace: federated-learning
 spec:
   accessModes:
-    - ReadWriteMany  # Multiple pods can read
+    - ReadWriteMany  
   resources:
     requests:
-      storage: 2Gi  # For cached dataset
-  # Note: storageClassName omitted to use default storage class
+      storage: 2Gi

@@ -24,15 +24,13 @@ class MaliciousClientDetector:
         self.save_dir.mkdir(parents=True, exist_ok=True)
         self.num_clients = num_clients
         self.model_config = model_config
-        self.min_rounds_before_detection = min_rounds_before_detection  # ← ADD THIS
+        self.min_rounds_before_detection = min_rounds_before_detection
         
-        # Storage for client behaviors
         self.client_behaviors = defaultdict(list)
         self.round_data = []
         self.current_round_malicious = []
         self.malicious_history = {}
         
-        # Detection components
         self.detector_model = None
         self.tokenizer = None
         self.is_trained = False
@@ -48,12 +46,11 @@ class MaliciousClientDetector:
         if reference_model is not None:
             self._extract_layer_names_from_model(reference_model)
         
-        # Try to load pre-trained components
         scaler_loaded = self.load_scaler_from_model_path()
         self.load_distilbert_model()
         
         logger.info(f"Initialized detector for {num_clients} clients")
-        logger.info(f"Detection will start from round {min_rounds_before_detection}")  # ← ADD THIS
+        logger.info(f"Detection will start from round {min_rounds_before_detection}")
         if self.layer_names:
             logger.info(f"Extracted {len(self.layer_names)} layer names")
 
@@ -94,10 +91,8 @@ class MaliciousClientDetector:
                 logger.warning("No model path in config")
                 return
 
-            # Load tokenizer from adapter directory
             self.tokenizer = AutoTokenizer.from_pretrained(model_path)
 
-            # Load base DistilBERT model first
             base_model_name = "distilbert-base-uncased"
             logger.info(f"Loading base model: {base_model_name}")
             base_model = AutoModelForSequenceClassification.from_pretrained(
@@ -105,11 +100,9 @@ class MaliciousClientDetector:
                 num_labels=2
             )
 
-            # Load LoRA adapter on top of base model
             logger.info(f"Loading LoRA adapter from: {model_path}")
             self.detector_model = PeftModel.from_pretrained(base_model, model_path)
             
-            # Merge adapter with base model for faster inference
             logger.info("Merging LoRA adapter with base model...")
             self.detector_model = self.detector_model.merge_and_unload()
             
@@ -118,7 +111,6 @@ class MaliciousClientDetector:
 
             logger.info("✓ Loaded DistilBERT base model + LoRA adapter (merged)")
             
-            # DEBUG: Log model statistics to verify it's trained
             logger.info("🔍 MODEL VERIFICATION:")
             logger.info(f"  Model type: {type(self.detector_model).__name__}")
             logger.info(f"  Number of parameters: {sum(p.numel() for p in self.detector_model.parameters())}")
@@ -127,8 +119,6 @@ class MaliciousClientDetector:
                 classifier_weight_std = self.detector_model.classifier.weight.std().item()
                 logger.info(f"  Classifier weight mean: {classifier_weight_mean:.6f}")
                 logger.info(f"  Classifier weight std: {classifier_weight_std:.6f}")
-                # Untrained model: mean ~0, std ~0.02
-                # Trained model: mean and std will be different
                 if abs(classifier_weight_mean) < 0.01 and abs(classifier_weight_std - 0.02) < 0.01:
                     logger.warning("⚠️  Classifier weights look UNTRAINED (mean~0, std~0.02)!")
                 else:
@@ -235,11 +225,9 @@ class MaliciousClientDetector:
                 logger.error("Scaler not fitted! Cannot scale features.")
                 return None
 
-            # Only keep features expected by the scaler
             feature_dict = {k: raw_features[k] for k in self.feature_scaler.feature_names_in_ if k in raw_features}
             feature_df = pd.DataFrame([feature_dict])
             
-            # DEBUG: Log raw feature values
             logger.debug(f"🔍 RAW features (before scaling):")
             for key in ['param_mean', 'param_std', 'param_min', 'param_max', 'cosine_similarity']:
                 if key in feature_dict:
@@ -249,7 +237,6 @@ class MaliciousClientDetector:
             feature_df[numerical_cols] = self.feature_scaler.transform(feature_df[numerical_cols])
             scaled_features = feature_df.iloc[0].to_dict()
             
-            # DEBUG: Log scaled feature values
             logger.debug(f"🔍 SCALED features (after scaling):")
             for key in ['param_mean', 'param_std', 'param_min', 'param_max', 'cosine_similarity']:
                 if key in scaled_features:
@@ -263,55 +250,44 @@ class MaliciousClientDetector:
     def update_client_behavior(self, client_id, round_num, current_round_params, prev_round_params):
         """Update client behavior tracking with PROPER SCALING"""
         
-        # ✅ ADD: Skip detection if before min_rounds_before_detection
         if round_num < self.min_rounds_before_detection:
             logger.info(f"Round {round_num} < {self.min_rounds_before_detection} - skipping detection for client {client_id}")
-            return 0  # Return benign (0)
+            return 0
         
-        # Extract RAW features first
         curr_param_dict = self._convert_params_to_dict(current_round_params)
         prev_param_dict = self._convert_params_to_dict(prev_round_params)
         
-        # If prev_round_params was None, prev_param_dict will be empty - pass None instead
         if prev_round_params is None:
             prev_param_dict = None
             
         raw_features = self.extract_client_features(client_id, round_num, curr_param_dict, prev_param_dict)
         logger.info(f"Client {client_id} Round {round_num} raw features:")
-        # logger.info(f"  {raw_features}")
         if not raw_features:
             logger.warning(f"Features are empty, can't predict the output")
             return 0.0
         
         
-        # CRITICAL: Scale the features BEFORE creating text (same as evaluation code)
         scaled_features = self.scale_features_for_text(raw_features)
         if scaled_features is None:
             logger.warning(f"Failed to scale features for client {client_id}")
             return 0.0
-        # print("scaled_features+",scaled_features)
 
-        # Create behavior description with SCALED values (same as training)
         behavior_description = self.create_behavior_description(scaled_features)
         
-        # DEBUG: Print the scaled text being sent to model
         logger.info(f"Client {client_id} Round {round_num} behavior text:")
         logger.info(f"  {behavior_description}")
         
         self.client_behaviors[client_id].append(behavior_description)
         
-        # Store for analysis
         self.round_data.append({
             'client_id': client_id,
             'round': round_num,
             'behavior_text': behavior_description,
-            'raw_features': raw_features,  # Store raw
-            'scaled_features': scaled_features  # Store scaled
+            'raw_features': raw_features,
+            'scaled_features': scaled_features
         })
         
-        # If model is trained, get detection score
         if self.is_trained:
-            # DEBUG: Log feature sample for first client to compare with simulation
             if client_id == 0 and round_num <= 3:
                 logger.info(f"🔍 FEATURE DEBUG Client {client_id} Round {round_num}:")
                 logger.info(f"  param_mean: {scaled_features.get('param_mean', 0):.6f}")
@@ -323,12 +299,12 @@ class MaliciousClientDetector:
             
             logger.info(f"Client {client_id}: prob={malicious_prob:.3f}, prediction={predicted_class}")
             
-            if predicted_class == 1:  # Malicious
+            if predicted_class == 1:
                 if client_id not in self.current_round_malicious:
                     self.current_round_malicious.append(client_id)
                     logger.warning(f"Client {client_id} flagged as MALICIOUS in round {round_num}")
                 
-            else:  # Benign
+            else:
                 logger.info(f"Client {client_id} appears BENIGN in round {round_num}")
             return predicted_class
         else:
@@ -343,19 +319,16 @@ class MaliciousClientDetector:
                 logger.warning(f"Insufficient samples to fit scaler: {len(self.raw_features_buffer)} < {self.min_samples_for_scaler}")
                 return False
             
-            # Convert raw features to DataFrame
             raw_df = pd.DataFrame(self.raw_features_buffer)
             
-            # Select only numeric columns for scaling
             numeric_cols = [col for col in raw_df.columns if col not in ['client_id', 'round_num']]
             numeric_data = raw_df[numeric_cols].values
             
-            # Fit the scaler
             self.feature_scaler.fit(numeric_data)
             self.scaler_fitted = True
             
             logger.info(f"MinMax scaler fitted with {len(self.raw_features_buffer)} samples")
-            logger.info(f"Scaling {len(numeric_cols)} numeric features: {numeric_cols[:5]}...")  # Show first 5
+            logger.info(f"Scaling {len(numeric_cols)} numeric features: {numeric_cols[:5]}...")
             
             return True
             
@@ -368,12 +341,11 @@ class MaliciousClientDetector:
         try:
             self.layer_names = []
             
-            # Use state_dict to get ALL keys (weights, biases, AND buffers)
             if hasattr(model, 'state_dict'):
                 state_dict = model.state_dict()
                 self.layer_names = list(state_dict.keys())
                 logger.info(f"Extracted {len(self.layer_names)} parameter names from state_dict")
-                logger.debug(f"Parameter names: {self.layer_names[:5]}...")  # Show first 5
+                logger.debug(f"Parameter names: {self.layer_names[:5]}...")
                 return
             
             logger.warning("Could not extract layer names from model - no state_dict method found")
@@ -393,27 +365,20 @@ class MaliciousClientDetector:
         
         param_dict = {}
         
-        # Get expected parameter names from the model
         if self.layer_names and len(param_list) > 0:
-            # Flower sends ALL state_dict items in the same order as model.state_dict().items()
-            # This includes weights, biases, AND BatchNorm buffers
             expected_param_count = len(self.layer_names)
             
             if len(param_list) == expected_param_count:
-                # Perfect match - use actual layer names
                 for name, param in zip(self.layer_names, param_list):
                     param_dict[name] = param
                 logger.debug(f"Mapped {len(param_list)} parameters using model layer names")
                 
             else:
-                # Mismatch detected - need to handle this carefully
                 logger.warning(
                     f"Parameter count mismatch: {len(param_list)} params vs "
                     f"{expected_param_count} expected layer names"
                 )
                 
-                # CRITICAL FIX: Re-extract layer names to include ALL state_dict keys
-                # including BatchNorm buffers
                 if hasattr(self, 'model_config') and hasattr(self.model_config, 'model_instance'):
                     model = self.model_config.model_instance
                     all_keys = list(model.state_dict().keys())
@@ -424,12 +389,10 @@ class MaliciousClientDetector:
                         logger.info(f"✓ Mapped using complete state_dict keys (including BatchNorm)")
                         return param_dict
                 
-                # Fallback: use generic names
                 for i, param in enumerate(param_list):
                     param_dict[f'layer_{i}'] = param
                 logger.warning("Using generic layer names - feature extraction may be incomplete")
         else:
-            # No layer names available
             for i, param in enumerate(param_list):
                 param_dict[f'layer_{i}'] = param
             logger.info("No layer names available, using generic names")
@@ -438,7 +401,6 @@ class MaliciousClientDetector:
     
     def save_performance_metrics(self, metrics, round_num):
         """Log metrics for a specific round to file"""
-        # Format results as text
         metrics_text = (
             f"Round {round_num:2d} | "
             f"Accuracy: {metrics['accuracy']:.3f} | "
@@ -457,11 +419,9 @@ class MaliciousClientDetector:
         
         log_file = os.path.join(self.save_dir, "detection_metrics.log")
         
-        # Append metrics for current round
         with open(log_file, 'a') as f:
             f.write(metrics_text + "\n")
         
-        # Also print to console
         print(metrics_text)
 
     def finalize_metrics_log(self):
@@ -495,11 +455,9 @@ class MaliciousClientDetector:
     def start_new_round(self, round_num):
         """Call this at the beginning of each round to reset detection"""
         if self.current_round_malicious:
-            # Save previous round's results
             self.malicious_history[round_num - 1] = self.current_round_malicious.copy()
             logger.info(f"Saved round {round_num - 1} malicious clients: {self.current_round_malicious}")
         
-        # Reset for new round
         self.current_round_malicious = []
         logger.info(f"Started round {round_num} - reset malicious client detection")
 
@@ -533,7 +491,6 @@ class MaliciousClientDetector:
             'clients_analyzed': len(self.client_behaviors)
         }
         
-        # Save to file
         analysis_path = self.save_dir / f"round_{round_num}_analysis.json"
         with open(analysis_path, 'w') as f:
             json.dump(analysis_data, f, indent=2)

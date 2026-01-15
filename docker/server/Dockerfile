@@ -12,7 +12,7 @@ COPY docker/server/requirements.txt .
 # Install with increased timeout and retries for large packages like PyTorch
 RUN pip install --no-cache-dir --timeout=1000 --retries=5 -r requirements.txt
 
-# Copy source code
+# COPY source code
 COPY src/ ./src/
 COPY config/ ./config/
 COPY modules/ ./modules/
@@ -26,11 +26,15 @@ RUN mkdir -p /app/initial_params
 # Copy detector model directly into the image
 COPY detector_model/ /app/detector_model/
 
-# Pre-download DistilBERT base model during build (cached in image)
-RUN python -c "from transformers import AutoTokenizer, AutoModelForSequenceClassification; \
-    print('Downloading DistilBERT base model...'); \
-    AutoTokenizer.from_pretrained('distilbert-base-uncased'); \
-    AutoModelForSequenceClassification.from_pretrained('distilbert-base-uncased', num_labels=2); \
-    print('✓ Base model cached in image')"
+# Set Python path so imports like "from src.shared..." work
+ENV PYTHONPATH=/app
 
-CMD ["python", "-m", "src.server.server_main"]
+# Pre-download DistilBERT base model during build (cached in image)
+# RUN python -c "from transformers import AutoTokenizer, AutoModelForSequenceClassification; \
+#     print('Downloading DistilBERT base model...'); \
+#     AutoTokenizer.from_pretrained('distilbert-base-uncased'); \
+#     AutoModelForSequenceClassification.from_pretrained('distilbert-base-uncased', num_labels=2); \
+#     print('✓ Base model cached in image')"
+
+# Changed from -m flag to direct path since we copied the source
+CMD ["python", "src/server/server_main.py"]

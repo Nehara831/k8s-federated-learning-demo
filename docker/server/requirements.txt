@@ -11,3 +11,6 @@ transformers==4.30.0
 datasets==2.12.0
 kagglehub
 peft==0.4.0
+python-dotenv==1.0.0
+boto3==1.34.0
+shap==0.45.0

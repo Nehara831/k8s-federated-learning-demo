@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y \
 COPY docker/client/requirements.txt .
 RUN pip install --no-cache-dir --timeout=1000 --retries=5 -r requirements.txt
 
-# Copy source code
+# COPY source code
 COPY src/ ./src/
 COPY config/ ./config/
 COPY modules/ ./modules/

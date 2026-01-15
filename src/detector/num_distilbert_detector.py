@@ -1,11 +1,4 @@
-"""
-Num-DistilBERT: Pointwise Malicious Client Detector
-Treats each client as an independent sample (not set-based).
-Uses FT-Transformer style feature embedding + DistilBERT.
 
-This approach maximizes training data by treating every client as a sample,
-unlike FedGuard which treats each round as a sample.
-"""
 
 import torch
 import torch.nn as nn
@@ -22,45 +15,30 @@ class FeatureTokenizer(nn.Module):
     """
     Converts 22 numerical features into a sequence of 22 dense vectors.
     This acts as the "Input Embedding" layer for the Transformer.
-    Based on FT-Transformer (Gorishniy et al., 2021).
     """
     def __init__(self, num_features=22, embedding_dim=768):
         super().__init__()
         
-        # Feature Projectors: A separate Linear layer for EACH feature
-        # This allows the model to learn that "feature 5" (e.g., L2 dist) 
-        # has a different meaning/scale than "feature 1" (e.g., mean)
+        
         self.feature_projectors = nn.ModuleList([
             nn.Linear(1, embedding_dim) for _ in range(num_features)
         ])
         
-        # Feature Biases (The "Positional Embeddings" for features):
-        # Since features don't have a sequential order (feature 1 isn't "before" feature 2),
-        # we add a learnable vector to identify WHICH feature is which
+
         self.feature_id_bias = nn.Parameter(torch.randn(1, num_features, embedding_dim))
         
-        # Layer Norm for stability
         self.layer_norm = nn.LayerNorm(embedding_dim)
 
     def forward(self, x):
-        """
-        Args:
-            x: [batch_size, num_features] - Raw feature values
-        Returns:
-            [batch_size, num_features, embedding_dim] - Feature token embeddings
-        """
+        
         embeddings = []
         for i, projector in enumerate(self.feature_projectors):
-            # Get the i-th column (i-th feature)
             feat_val = x[:, i].unsqueeze(1)  # [batch_size, 1]
-            # Project it to embedding space
             emb = projector(feat_val)  # [batch_size, embedding_dim]
             embeddings.append(emb)
             
-        # Stack into a sequence: [batch_size, num_features, embedding_dim]
         x_emb = torch.stack(embeddings, dim=1)
         
-        # Add the identity bias (so the model knows "Token 0 is param_mean")
         x_emb = x_emb + self.feature_id_bias
         
         return self.layer_norm(x_emb)
@@ -79,26 +57,19 @@ class NumDistilBERT(nn.Module):
     def __init__(self, num_features=22):
         super().__init__()
         
-        # Stage 1: The Embedding Layer (Numbers -> Vectors)
-        # We project directly to 768 to match DistilBERT's native dimension
         self.input_embedding = FeatureTokenizer(num_features, embedding_dim=768)
         
-        # Stage 2: The CLS Token
-        # Standard BERT practice: a special token at the start to aggregate the entire sequence
         self.cls_token = nn.Parameter(torch.randn(1, 1, 768))
         
-        # Stage 3: The Backbone (DistilBERT)
-        # We treat the sequence of 23 features as a "sentence" of 23 words
         config = DistilBertConfig(
             dim=768, 
-            n_layers=4,        # Lighter than standard (6) for speed
+            n_layers=4,        
             n_heads=8, 
-            vocab_size=1,      # Unused, but required by config
+            vocab_size=1,      
             max_position_embeddings=512
         )
         self.backbone = DistilBertModel(config)
         
-        # Stage 4: Classification Head
         self.classifier = nn.Sequential(
             nn.Linear(768, 256),
             nn.ReLU(),
@@ -115,44 +86,29 @@ class NumDistilBERT(nn.Module):
         """
         batch_size = x.shape[0]
         
-        # A. Embed features -> [batch_size, num_features, 768]
         feature_embeds = self.input_embedding(x)
         
-        # B. Prepend CLS token -> [batch_size, num_features+1, 768]
         cls_tokens = self.cls_token.expand(batch_size, -1, -1)
         inputs_embeds = torch.cat((cls_tokens, feature_embeds), dim=1)
         
-        # C. Pass to DistilBERT
-        # We assume all features are present, so attention_mask is all 1s
         outputs = self.backbone(inputs_embeds=inputs_embeds)
         
-        # D. Extract CLS state (first token) - [batch_size, 768]
         cls_state = outputs.last_hidden_state[:, 0, :]
         
-        # E. Classify - [batch_size, 1] -> [batch_size]
         logits = self.classifier(cls_state)
         
         return logits.squeeze(-1)
 
 
 class NumDistilBERTDetector:
-    """
-    Wrapper class for Num-DistilBERT detector.
-    Provides API compatible with training scripts.
-    """
+    
     def __init__(self, num_features=22, model_path=None, scaler_path=None):
-        """
-        Args:
-            num_features: Number of input features (default: 22)
-            model_path: Path to pre-trained model checkpoint (optional)
-            scaler_path: Path to fitted MinMaxScaler (optional)
-        """
+        
         self.num_features = num_features
         self.model = NumDistilBERT(num_features)
         self.scaler = None
         self.is_trained = False
         
-        # Feature names (must match training data - 22 features)
         self.feature_names = [
             'param_mean', 'param_std', 'param_min', 'param_max',
             'param_median', 'param_range', 'param_abs_mean',
@@ -164,15 +120,13 @@ class NumDistilBERTDetector:
             'avg_l2_distance', 'cosine_similarity'
         ]
         
-        # Load pre-trained model if provided
         if model_path:
             self.load_model(model_path)
         
-        # Load scaler if provided
         if scaler_path:
             self.load_scaler(scaler_path)
         
-        logger.info(f"✅ Initialized Num-DistilBERT detector")
+        logger.info(f" Initialized Num-DistilBERT detector")
         logger.info(f"   Features: {num_features}")
         logger.info(f"   Parameters: {sum(p.numel() for p in self.model.parameters()):,}")
         logger.info(f"   Trained: {self.is_trained}")
@@ -180,17 +134,15 @@ class NumDistilBERTDetector:
     def load_model(self, model_path):
         """Load pre-trained model weights"""
         try:
-            # Try loading with weights_only=False for better compatibility
             try:
                 checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
             except TypeError:
-                # Fallback for older PyTorch versions that don't support weights_only
                 checkpoint = torch.load(model_path, map_location='cpu')
             
             self.model.load_state_dict(checkpoint['model_state_dict'])
             self.model.eval()
             self.is_trained = True
-            logger.info(f"✅ Loaded model from {model_path}")
+            logger.info(f" Loaded model from {model_path}")
             logger.info(f"   Epoch: {checkpoint.get('epoch', 'unknown')}")
             logger.info(f"   Best F1: {checkpoint.get('best_f1', 'unknown')}")
         except Exception as e:
@@ -201,7 +153,7 @@ class NumDistilBERTDetector:
         """Load fitted MinMaxScaler"""
         try:
             self.scaler = joblib.load(scaler_path)
-            logger.info(f"✅ Loaded scaler from {scaler_path}")
+            logger.info(f" Loaded scaler from {scaler_path}")
         except Exception as e:
             logger.error(f"Failed to load scaler: {e}")
             self.scaler = None
@@ -223,7 +175,6 @@ class NumDistilBERTDetector:
             return 0, 0.5
         
         try:
-            # Convert features to array
             if isinstance(features, dict):
                 feature_array = np.array([
                     features.get(name, 0.0) for name in self.feature_names
@@ -231,11 +182,9 @@ class NumDistilBERTDetector:
             else:
                 feature_array = np.array(features)
             
-            # Scale features
             if self.scaler:
                 feature_array = self.scaler.transform([feature_array])[0]
             
-            # Convert to tensor
             x = torch.FloatTensor(feature_array).unsqueeze(0)  # [1, num_features]
             
             # Predict
@@ -300,7 +249,6 @@ class NumDistilBERTDetector:
             return [0] * len(features_list), [0.5] * len(features_list)
     
     def save(self, save_dir):
-        """Save model and scaler"""
         save_dir = Path(save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
         
@@ -318,3 +266,28 @@ class NumDistilBERTDetector:
             joblib.dump(self.scaler, scaler_path)
         
         logger.info(f"✅ Saved model to {save_dir}")
+        
+    def aggregate_fit(self, server_round, results):
+        
+        client_predictions = {}
+        
+        if self.malicious_detector:
+            self.malicious_detector.start_new_round(server_round)
+
+        for client_proxy, fit_res in results:
+            cid = client_proxy.cid
+            
+            if self.malicious_detector:
+                prev_model = self.get_model_from_round(server_round - 1)
+                
+                prediction = self.malicious_detector.update_client_behavior(
+                    client_id=cid,
+                    round_num=server_round,
+                    current_round_params=parameters_to_ndarrays(fit_res.parameters),
+                    prev_round_params=prev_model
+                )
+                
+                client_predictions[cid] = prediction
+
+
+        return aggregated_parameters, client_predictions

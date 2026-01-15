@@ -13,7 +13,7 @@ spec:
       labels:
         app: fl-server
     spec:
-      restartPolicy: Always  # <-- Must be Always for Deployment!
+      restartPolicy: Always  
       containers:
       - name: fl-server
         image: fl-server:latest
@@ -27,6 +27,25 @@ spec:
           value: "true"
         - name: CACHED_DATA_PATH
           value: "/shared-data/preprocessed_data.pkl"
+        # AWS S3 credentials from Kubernetes Secret
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: aws-credentials
+              key: AWS_ACCESS_KEY_ID
+              optional: true  
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: aws-credentials
+              key: AWS_SECRET_ACCESS_KEY
+              optional: true
+        - name: AWS_DEFAULT_REGION
+          valueFrom:
+            secretKeyRef:
+              name: aws-credentials
+              key: AWS_DEFAULT_REGION
+              optional: true
         volumeMounts:
         - name: server-config
           mountPath: /app/config
@@ -51,6 +70,7 @@ spec:
           limits:
             memory: "3Gi"
             cpu: "2000m"
+        
       volumes:
       - name: server-config
         configMap:

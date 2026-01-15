@@ -3,8 +3,15 @@ dataset:
   test_size: 0.2
   seed: 42
   data_dir: "./data"
+  num_classes: 9
+  
+  distribution:
+    type: "label_skew"  # Options: 'iid', 'non_iid' (quantity skew), 'label_skew' (label distribution skew)
+    quantity_skew_ratio: 3.0  
+    alpha: 0.1  
+    partition_seed: 123  
 
-num_rounds: 5
+num_rounds: 15
 num_clients: 10
 batch_size: 8
 num_classes: 9
@@ -20,7 +27,7 @@ server:
 config_fit:
   lr: 0.01
   momentum: 0.9
-  local_epochs: 5
+  local_epochs: 1
 
 detector:
   enabled: true
@@ -33,3 +40,19 @@ detector:
     model_path: "/app/detector_model/finetuned_model_5gnidd_variant_merged_training"  
   min_rounds_before_detection: 3  
   use_simple_model_if_no_pretrained: false
+
+
+s3_export:
+  enabled: true
+  
+  bucket: "distil-guard-datalake"
+  
+  region: "ap-south-1"
+  
+
+  prefix: "sessions/"
+  
+  compress: true
+  
+  local_export_dir: "/app/temp-data"
+
